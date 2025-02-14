@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "aria2": "^4.1.2",
+    "mongodb": "^6.13.0",
+    "puppeteer-real-browser": "^1.4.0",
+    "telegram": "^2.26.22"
+  }
+}

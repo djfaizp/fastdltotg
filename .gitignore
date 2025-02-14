@@ -1,0 +1,10 @@
+# Add patterns to ignore here, one per line
+*.log
+tmp/
+node_modules/
+package-lock.json
+.vscode/
+.repomixignore
+repomix-output.md
+.env*
+repomix.config.json
