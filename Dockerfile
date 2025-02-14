@@ -1,40 +1,27 @@
-FROM node:18-slim
+FROM node:latest
 
-# Install dependencies required by puppeteer-real-browser and aria2
 RUN apt-get update && apt-get install -y \
     wget \
+    gnupg \
     ca-certificates \
-    fonts-liberation \
-    libnss3 \
+    apt-transport-https \
+    chromium \
+    chromium-driver \
     xvfb \
-    libxss1 \
-    libasound2 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxcomposite1 \
-    libxrandr2 \
-    libgbm1 \
-    libpango-1.0-0 \
-    libpangocairo-1.0-0 \
-    libxdamage1 \
-    libxfixes3 \
-    --no-install-recommends && \
-    rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
-# Create app directory
+ENV CHROME_BIN=/usr/bin/chromium
+
 WORKDIR /app
 
-# Copy package.json and install dependencies
-COPY package.json ./
-RUN npm install
+COPY package*.json ./
 
-# Copy all the code
+RUN npm update
+RUN npm install
+RUN npm i -g pm2
 COPY . .
 
-# Expose a port if your app listens on one (adjust if needed)
-EXPOSE 1234
+EXPOSE 3000
 
-# Start the app
-CMD ["npm", "start"]
+CMD ["pm2-runtime", "index.js"]
+
