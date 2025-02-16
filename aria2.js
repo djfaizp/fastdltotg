@@ -42,28 +42,34 @@ const EMOJI_MAP = Object.freeze({
 
 // Memoize sanitized metadata
 const metadataCache = new Map();
-const sanitizeMetadata = (doc) => {
+function sanitizeMetadata(doc) {
     const cacheKey = doc._id?.toString();
     if (cacheKey && metadataCache.has(cacheKey)) {
-        return metadataCache.get(cacheKey);
+      return metadataCache.get(cacheKey);
     }
-
     const sanitized = {
-        title: String(doc.title || '').trim(),
-        language: String(doc.language || '').trim(),
-        originalLanguage: String(doc.originalLanguage || '').trim(),
-        runtime: String(doc.runtime || '').trim(),
-        genres: Array.isArray(doc.genres) ? doc.genres.filter(Boolean).map(String) : []
+      title: String(doc.title || '').trim(),
+      language: String(doc.language || doc.Language || '').trim(),
+      originalLanguage: String(doc.originalLanguage || doc["Original Language"] || '').trim(),
+      runtime: String(doc.runtime || doc.Runtime || '').trim(),
+      genres: []
     };
-
-    if (cacheKey) {
-        metadataCache.set(cacheKey, sanitized);
-        // Clear cache after 5 minutes
-        setTimeout(() => metadataCache.delete(cacheKey), 300000);
+    // Handle genres whether it's stored as an array or a comma-separated string
+    if (doc.genres || doc.Genres) {
+      const rawGenres = doc.genres || doc.Genres;
+      if (Array.isArray(rawGenres)) {
+        sanitized.genres = rawGenres.filter(Boolean).map(String);
+      } else if (typeof rawGenres === 'string') {
+        sanitized.genres = rawGenres.split(',').map(g => g.trim()).filter(Boolean);
+      }
     }
-
+    if (cacheKey) {
+      metadataCache.set(cacheKey, sanitized);
+      setTimeout(() => metadataCache.delete(cacheKey), 300000);
+    }
     return sanitized;
-};
+  }
+  
 
 const formatMetadata = (doc, resolution) => {
     const sanitized = sanitizeMetadata(doc);
