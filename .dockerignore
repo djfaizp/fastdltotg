@@ -1,0 +1,49 @@
+# Node.js
+node_modules
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# Environment files
+.env*
+.env.local
+.env.*.local
+
+# Development files
+.git
+.gitignore
+.dockerignore
+docker-compose.yml
+README.md
+*.md
+.vscode
+.idea
+*.log
+
+# Build and test directories
+coverage
+.nyc_output
+dist
+build
+
+# Downloaded files and data
+downloads/
+mongodb_data/
+aria2_config/
+
+# Project specific
+repomix-output.md
+repomix.config.json
+.repomixignore
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Debug files
+error-screenshot-*.png
+
+# Temporary files
+tmp/
+temp/
+*.tmp
