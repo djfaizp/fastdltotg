@@ -10,6 +10,8 @@ services:
       - ./chrome-data:/app/chrome-data:rw,z
     environment:
       - NODE_ENV=production
+      - ARIA2_HOST=aria2
+      - ARIA2_PORT=6800
       - TELEGRAM_API_ID=${TELEGRAM_API_ID}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
       - TELEGRAM_STRING_SESSION=${TELEGRAM_STRING_SESSION}
@@ -30,7 +32,7 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
-      - RPC_SECRET=
+      - RPC_SECRET=P3TERX
       - RPC_PORT=6800
     volumes:
       - ./downloads:/aria2/data

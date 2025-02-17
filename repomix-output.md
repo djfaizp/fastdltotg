@@ -36,363 +36,567 @@ The content is organized as follows:
 
 # Directory Structure
 ```
+workers/
+  aria2Worker.js
+  baseWorker.js
+  downloadWorker.js
+  telegramWorker.js
 aria2.js
 db.js
+docker-compose.yml
 Dockerfile
 generate_session.js
 index.js
 package.json
+processors.js
 telegram.js
+utils.js
 ```
 
 # Files
+
+## File: workers/aria2Worker.js
+```javascript
+const BaseWorker = require('./baseWorker');
+const { downloadVideo } = require('../aria2');
+const { PROCESSING_STATUS } = require('../db');
+class Aria2Worker extends BaseWorker {
+  constructor() {
+    super('posts', {
+      workerName: 'Aria2Worker',
+      pollingInterval: 5000,
+      errorRetryDelay: 10000,
+      documentFilter: {
+        processingStatus: PROCESSING_STATUS.READY_FOR_ARIA2,
+        directUrls: { $exists: true, $ne: {} }
+      },
+      initialStatusUpdate: {
+        $set: {
+          processingStatus: PROCESSING_STATUS.DOWNLOADING_ARIA2,
+          startedAt: new Date()
+        }
+      },
+      processDocument: async (doc, collection) => {
+        console.log(`[Aria2Worker] Processing direct URLs for ${doc._id}`);
+        for (const [resolution, url] of Object.entries(doc.directUrls)) {
+          console.log(`[Aria2Worker] Downloading ${resolution} from ${url}`);
+          if (!url || doc.uploadedToTelegram?.[resolution]) continue;
+          const downloadResult = await downloadVideo(
+            url,
+            process.env.ARIA2_DOWNLOAD_DIR,
+            { ...doc, resolution }
+          );
+          console.log(`[Aria2Worker] ${resolution} download completed for ${doc._id}`);
+          if (downloadResult.success) {
+            await collection.updateOne(
+              { _id: doc._id },
+              {
+                $set: {
+                  [`uploadedToTelegram.${resolution}`]: true,
+                  processingStatus: PROCESSING_STATUS.READY_FOR_TELEGRAM,
+                  completedAt: new Date()
+                }
+              }
+            );
+          }
+        }
+      }
+    });
+  }
+}
+module.exports = Aria2Worker;
+```
+
+## File: workers/baseWorker.js
+```javascript
+const { getCollection } = require('../db');
+const { PROCESSING_STATUS } = require('../db');
+const { delay } = require('../utils.js');
+class BaseWorker {
+  constructor(collectionName, workerConfig) {
+    this.collectionName = collectionName;
+    this.config = workerConfig;
+    this.shouldRun = true;
+    this.activeDocumentId = null;
+  }
+  async initialize() {
+    this.collection = await getCollection(this.collectionName);
+  }
+  async start() {
+    await this.initialize();
+    console.log(`[${this.config.workerName}] Starting worker`);
+    while (this.shouldRun) {
+      try {
+        console.log(`[${this.config.workerName}] Polling for documents...`);
+        const doc = await this.findNextDocument();
+        if (!doc) {
+          console.log(`[${this.config.workerName}] No documents found. Retrying in ${this.config.pollingInterval}ms`);
+          await delay(this.config.pollingInterval);
+          continue;
+        }
+        this.activeDocumentId = doc._id;
+        console.log(`[${this.config.workerName}] Processing document ${doc._id}`);
+        await this.config.processDocument(doc, this.collection);
+        console.log(`[${this.config.workerName}] Completed processing document ${doc._id}`);
+      } catch (error) {
+        console.error(`[${this.config.workerName}] Error in worker loop:`, error);
+        if (doc) await this.handleError(doc._id, error);
+        await delay(this.config.errorRetryDelay);
+      } finally {
+        this.activeDocumentId = null;
+      }
+    }
+  }
+  async stop() {
+    console.log(`[${this.config.workerName}] Stopping worker...`);
+    this.shouldRun = false;
+    while (this.activeDocumentId) {
+      console.log(`[${this.config.workerName}] Waiting for current document ${this.activeDocumentId} to finish...`);
+      await delay(1000);
+    }
+  }
+  async findNextDocument() {
+    return this.collection.findOneAndUpdate(
+      this.config.documentFilter,
+      this.config.initialStatusUpdate,
+      { returnDocument: 'after' }
+    );
+  }
+  async handleError(docId, error) {
+    console.error(`[${this.config.workerName}] Error processing ${docId}:`, error);
+    await this.collection.updateOne(
+      { _id: docId },
+      {
+        $set: {
+          processingStatus: PROCESSING_STATUS.ERROR,
+          error: error.message,
+          lastErrorAt: new Date()
+        }
+      }
+    );
+  }
+}
+module.exports = BaseWorker;
+```
+
+## File: workers/downloadWorker.js
+```javascript
+const BaseWorker = require('./baseWorker');
+const { PROCESSING_STATUS } = require('../db');
+const { processUrl } = require('../processors');
+class DownloadWorker extends BaseWorker {
+  constructor() {
+    super('posts', {
+      workerName: 'DownloadWorker',
+      pollingInterval: 5000,
+      errorRetryDelay: 10000,
+      documentFilter: {
+        isScraped: true,
+        processingStatus: PROCESSING_STATUS.PENDING,
+        $or: [
+          { directUrls: { $exists: false } },
+          { directUrls: {} }
+        ]
+      },
+      initialStatusUpdate: {
+        $set: {
+          processingStatus: PROCESSING_STATUS.DOWNLOADING,
+          startedAt: new Date()
+        }
+      },
+      processDocument: async (doc, collection) => {
+        console.log(`[DownloadWorker] Processing ${doc._id}`);
+        const updates = {
+          directUrls: {},
+          processingStatus: PROCESSING_STATUS.READY_FOR_ARIA2,
+          completedAt: new Date()
+        };
+        try {
+          for (const res of ['480p', '720p', '1080p']) {
+            if (!doc[res]) continue;
+            updates.directUrls[res] = await processUrl(doc[res], doc, res);
+          }
+        } finally {
+          await collection.updateOne({ _id: doc._id }, { $set: updates });
+        }
+      }
+    });
+  }
+}
+module.exports = DownloadWorker;
+```
+
+## File: workers/telegramWorker.js
+```javascript
+const BaseWorker = require('./baseWorker');
+const { PROCESSING_STATUS } = require('../db');
+const { uploadToTelegram } = require('../telegram');
+const { formatCaption, formatMetadata } = require('../aria2');
+const path = require('path');
+class TelegramWorker extends BaseWorker {
+  constructor() {
+    super('posts', {
+      workerName: 'TelegramWorker',
+      pollingInterval: 5000,
+      errorRetryDelay: 10000,
+      documentFilter: {
+        processingStatus: PROCESSING_STATUS.READY_FOR_TELEGRAM,
+        uploadedToTelegram: { $exists: true }
+      },
+      initialStatusUpdate: {
+        $set: {
+          processingStatus: PROCESSING_STATUS.UPLOADING_TELEGRAM,
+          startedAt: new Date()
+        }
+      },
+      processDocument: async (doc, collection) => {
+        console.log(`[TelegramWorker] Processing uploads for ${doc._id}`);
+        for (const resolution of ['480p', '720p', '1080p']) {
+          console.log(`[TelegramWorker] Checking ${resolution} for upload`);
+          if (!doc.directUrls?.[resolution] || !doc.uploadedToTelegram?.[resolution]) continue;
+          const filePath = path.join(
+            process.env.ARIA2_DOWNLOAD_DIR,
+            path.basename(doc.directUrls[resolution])
+          );
+          const metadata = formatMetadata(doc, resolution);
+          const caption = formatCaption(metadata, path.basename(filePath));
+          const uploadResult = await uploadToTelegram(filePath, caption);
+          console.log(`[TelegramWorker] ${resolution} uploaded successfully`);
+          if (uploadResult.success) {
+            await collection.updateOne(
+              { _id: doc._id },
+              {
+                $set: {
+                  [`telegramLinks.${resolution}`]: uploadResult.messageLink,
+                  processingStatus: PROCESSING_STATUS.COMPLETED,
+                  completedAt: new Date()
+                }
+              }
+            );
+          }
+        }
+      }
+    });
+  }
+}
+module.exports = TelegramWorker;
+```
 
 ## File: aria2.js
 ```javascript
 const Aria2 = require('aria2');
 const path = require('path');
 const { getCollection } = require('./db');
-const fs = require('fs');
+const fs = require('fs').promises;
+const { createReadStream } = require('fs');
 require('dotenv').config();
 const secret = process.env.ARIA2_SECRET;
 console.log('🔐 Initializing Aria2 client with host:', process.env.ARIA2_HOST, 'port:', process.env.ARIA2_PORT);
 if (!secret) {
     console.warn('⚠️ ARIA2_SECRET environment variable is not set!');
 }
-const aria2 = new Aria2({
+const aria2Config = {
     host: "aria2",
     port: 6800,
     secure: false,
     secret: process.env.ARIA2_SECRET,
-    path: '/jsonrpc'
+    path: '/jsonrpc',
+    maxRetries: 3,
+    retry: true,
+    retryInterval: 1000,
+    timeout: 30000,
+    keepalive: true
+};
+let aria2Instance = null;
+const getAria2Client = () => {
+    if (!aria2Instance) {
+      aria2Instance = new Aria2(aria2Config);
+      aria2Instance.on('error', (err) => {
+        console.error('❌ Aria2 connection error:', err);
+        aria2Instance = null;
+      });
+      aria2Instance.on('open', () =>
+        console.log('✅ Aria2 connection established'));
+      aria2Instance.on('close', () =>
+        console.warn('⚠️ Aria2 connection closed'));
+    }
+    return aria2Instance;
+  };
+const EMOJI_MAP = Object.freeze({
+    movie: '🎬',
+    file: '📁',
+    language: '🗣️',
+    originalLanguage: '🌍',
+    runtime: '⏱️',
+    genres: '🎭'
 });
-aria2.on('error', (error) => {
-    console.error('Aria2 WebSocket error:', error);
-});
-aria2.on('close', () => {
-    console.log('Aria2 WebSocket connection closed');
-});
-aria2.on('websocket-error', (error) => {
-    console.error('WebSocket connection error:', error);
-});
-aria2.on('socketHangup', () => {
-    console.error('WebSocket connection hung up');
+const metadataCache = new Map();
+function sanitizeMetadata(doc) {
+    const cacheKey = doc._id?.toString();
+    if (cacheKey && metadataCache.has(cacheKey)) {
+      return metadataCache.get(cacheKey);
+    }
+    const sanitized = {
+      title: String(doc.title || '').trim(),
+      language: String(doc.language || doc.Language || '').trim(),
+      originalLanguage: String(doc.originalLanguage || doc["Original Language"] || '').trim(),
+      runtime: String(doc.runtime || doc.Runtime || '').trim(),
+      genres: []
+    };
+    // Handle genres whether it's stored as an array or a comma-separated string
+    if (doc.genres || doc.Genres) {
+      const rawGenres = doc.genres || doc.Genres;
+      if (Array.isArray(rawGenres)) {
+        sanitized.genres = rawGenres.filter(Boolean).map(String);
+      } else if (typeof rawGenres === 'string') {
+        sanitized.genres = rawGenres.split(',').map(g => g.trim()).filter(Boolean);
+      }
+    }
+    if (cacheKey) {
+      metadataCache.set(cacheKey, sanitized);
+      setTimeout(() => metadataCache.delete(cacheKey), 300000);
+    }
+    return sanitized;
+  }
+const formatMetadata = (doc, resolution) => {
+    const sanitized = sanitizeMetadata(doc);
+    return {
+        Movie: sanitized.title,
+        Language: sanitized.language,
+        'Original Language': sanitized.originalLanguage,
+        Runtime: sanitized.runtime,
+        Genres: sanitized.genres.join(', '),
+        resolution
+    };
+};
+const formatCaption = (metadata, fileName) => {
+    if (!fileName) throw new Error('Filename is required');
+    return `${EMOJI_MAP.movie} ${metadata.Movie || 'N/A'}
+${EMOJI_MAP.file} ${fileName}
+${EMOJI_MAP.language} ${metadata.Language || 'N/A'}
+${EMOJI_MAP.originalLanguage} ${metadata['Original Language'] || 'N/A'}
+${EMOJI_MAP.runtime} ${metadata.Runtime || 'N/A'}
+${EMOJI_MAP.genres} ${metadata.Genres || 'N/A'}`;
+};
+const DEFAULT_DOWNLOAD_OPTIONS = Object.freeze({
+    split: '16',
+    'max-connection-per-server': '16',
+    'continue': true,
+    'allow-overwrite': 'true',
+    'auto-file-renaming': 'false',
+    'piece-length': '1M',
+    'lowest-speed-limit': '1K',
+    'max-tries': '5',
+    'retry-wait': '10',
+    timeout: '600',
+    'connect-timeout': '60',
+    'max-file-not-found': '5',
+    'stream-piece-selector': 'geom',
+    'disk-cache': '64M',
+    'file-allocation': 'none',
+    'async-dns': 'true',
+    'enable-http-keep-alive': 'true',
+    'enable-http-pipelining': 'true'
 });
 async function downloadVideo(url, dir = process.env.ARIA2_DOWNLOAD_DIR, metadata = {}) {
+    const aria2 = getAria2Client();
     let currentGuid = null;
     let downloadedFilePath = null;
-    let fileSizeMB = null;
-    if (!dir || !dir.startsWith('/aria2/data')) {
-        throw new Error(`Invalid download directory: ${dir}. Must use Aria2's container path`);
-    }
-    const cleanup = async () => {
-        if (currentGuid) {
-            try {
-                await aria2.call('removeDownloadResult', currentGuid);
-            } catch (e) {
-                console.log('Cleanup warning:', e.message);
-            }
-        }
-        if (downloadedFilePath && fs.existsSync(downloadedFilePath)) {
-            try {
-                fs.unlinkSync(downloadedFilePath);
-                console.log('🗑️ Cleaned up downloaded file:', downloadedFilePath);
-            } catch (e) {
-                console.error('Failed to clean up file:', e.message);
-            }
-        }
-    };
     try {
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
-        }
-        let retries = 3;
-        let connected = false;
-        while (!connected && retries > 0) {
-            try {
-                await aria2.open();
-                connected = true;
-                console.log('📡 Aria2 connection opened');
-            } catch (error) {
-                retries--;
-                if (retries > 0) {
-                    console.log(`Connection failed, retrying... (${retries} attempts remaining)`);
-                    await new Promise(resolve => setTimeout(resolve, 5000));
-                } else {
-                    throw new Error(`Failed to connect to Aria2 after multiple attempts: ${error.message}`);
-                }
-            }
-        }
-        if (!url || typeof url !== 'string') {
-            throw new Error('Invalid download URL');
-        }
-        const options = {
-            dir: dir,
-            continue: true,
-            split: '16',
-            'max-connection-per-server': '16',
-            'allow-overwrite': 'true',
-            'auto-file-renaming': 'false',
-            'piece-length': '1M',
-            'lowest-speed-limit': '1K',
-            'max-tries': '5',
-            'retry-wait': '10',
-            timeout: '600',
-            'connect-timeout': '60',
-            'max-file-not-found': '5'
-        };
-        console.log('⬇️ Starting download:', url);
+        const options = Object.assign({}, DEFAULT_DOWNLOAD_OPTIONS, { dir });
         currentGuid = await aria2.call('addUri', [url], options);
-        console.log('📥 Download started with ID:', currentGuid);
-        const status = await waitForDownload(currentGuid);
+        const status = await new Promise((resolve, reject) => {
+            let lastUpdate = Date.now();
+            const checkStatus = async () => {
+                try {
+                    const status = await aria2.call('tellStatus', currentGuid);
+                    const now = Date.now();
+                    if (now - lastUpdate > 1000) {
+                        const progress = parseInt(status.completedLength) / parseInt(status.totalLength);
+                        process.stdout.write(`\rProgress: ${(progress * 100).toFixed(1)}%`);
+                        lastUpdate = now;
+                    }
+                    if (status.status === 'complete') {
+                        resolve(status);
+                    } else if (status.status === 'error') {
+                        reject(new Error(status.errorMessage));
+                    } else {
+                        setTimeout(checkStatus, 1000);
+                    }
+                } catch (error) {
+                    reject(error);
+                }
+            };
+            checkStatus();
+        });
         downloadedFilePath = status.files[0]?.path;
-        if (!downloadedFilePath) {
-            throw new Error('Download completed but file path is missing');
-        }
-        console.log('✅ Download completed successfully:', downloadedFilePath);
-        const fileName = path.basename(downloadedFilePath);
-        fileSizeMB = fs.statSync(downloadedFilePath).size / (1024 * 1024);
-        const caption =
-            `🎬 Movie: ${metadata.Movie || 'N/A'}\n` +
-            `📁 Filename: ${fileName}\n` +
-            `🗣️ Language: ${metadata.Language || 'N/A'}\n` +
-            `🌍 Original Language: ${metadata['Original Language'] || 'N/A'}\n` +
-            `⏱️ Runtime: ${metadata.Runtime || 'N/A'}\n` +
-            `🎭 Genres: ${metadata.Genres || 'N/A'}`;
-        console.log('🚀 Initiating Telegram upload...');
         const { uploadToTelegram } = require('./telegram');
-        const telegramResult = await uploadToTelegram(downloadedFilePath, caption);
-        if (!telegramResult.success) {
-            throw new Error('Telegram upload failed: ' + telegramResult.error);
-        }
+        const caption = formatCaption(metadata, path.basename(downloadedFilePath));
+        const uploadResult = await uploadToTelegram(downloadedFilePath, caption);
         if (metadata._id && metadata.resolution) {
+            const updates = {
+                [`uploadedToTelegram.${metadata.resolution}`]: true,
+                [`telegramLinks.${metadata.resolution}`]: uploadResult.messageLink,
+                lastUpdated: new Date()
+            };
             const postsCollection = await getCollection('posts');
             await postsCollection.updateOne(
                 { _id: metadata._id },
-                {
-                    $set: {
-                        [`uploadedToTelegram.${metadata.resolution}`]: true,
-                        [`telegramLinks.${metadata.resolution}`]: telegramResult.messageLink
-                    }
-                }
+                { $set: updates },
+                { w: 1 }
             );
-            console.log('📝 Updated MongoDB document with Telegram upload status');
         }
-        console.log('🎉 Process completed successfully!');
-        console.log('📎 Telegram link:', telegramResult.messageLink);
-        fs.unlinkSync(downloadedFilePath);
-        console.log('🗑️ Local file cleaned up:', downloadedFilePath);
-        return {
-            success: true,
-            guid: currentGuid,
-            fileName: fileName,
-            fileSize: fileSizeMB,
-            telegram: telegramResult
-        };
+        return { success: true, ...uploadResult };
     } catch (error) {
-        console.error('❌ Error during download/upload:', error.message);
-        console.error('Full error:', error);
-        return {
-            success: false,
-            skipped: true,
-            reason: `Process failed: ${error.message}`,
-            guid: currentGuid
-        };
+        console.error('Download error:', error);
+        return { success: false, error: error.message };
     } finally {
-        try {
-            await cleanup();
-            await aria2.close();
-            console.log('📡 Aria2 connection closed');
-        } catch (error) {
-            console.error('Error during cleanup/connection close:', error.message);
+        if (downloadedFilePath) {
+            await fs.unlink(downloadedFilePath).catch(() => {});
+        }
+        if (currentGuid) {
+            await aria2.call('removeDownloadResult', currentGuid).catch(() => {});
         }
     }
 }
-async function waitForDownload(guid) {
-    return new Promise((resolve, reject) => {
-        const checkInterval = 5000;
-        let timer;
-        let lastProgress = 0;
-        let staleCount = 0;
-        const MAX_STALE_CHECKS = 6;
-        const checkStatus = async () => {
-            try {
-                const status = await aria2.call('tellStatus', guid);
-                const completedLength = parseInt(status.completedLength, 10);
-                const totalLength = parseInt(status.totalLength, 10);
-                const speed = parseInt(status.downloadSpeed, 10);
-                const progress = totalLength > 0 ?
-                    ((completedLength / totalLength) * 100).toFixed(2) : 0;
-                console.log(`⏳ Download progress: ${progress}% ` +
-                    `(${(completedLength / 1024 / 1024).toFixed(2)}MB/` +
-                    `${(totalLength / 1024 / 1024).toFixed(2)}MB) ` +
-                    `Speed: ${(speed / 1024 / 1024).toFixed(2)}MB/s`);
-                if (status.status === 'complete') {
-                    clearInterval(timer);
-                    resolve(status);
-                } else if (status.status === 'error') {
-                    clearInterval(timer);
-                    reject(new Error(status.errorMessage || 'Download failed'));
-                }
-                if (completedLength === lastProgress) {
-                    staleCount++;
-                    if (staleCount >= MAX_STALE_CHECKS) {
-                        clearInterval(timer);
-                        reject(new Error('Download stalled - no progress for 30 seconds'));
-                    }
-                } else {
-                    staleCount = 0;
-                    lastProgress = completedLength;
-                }
-            } catch (error) {
-                clearInterval(timer);
-                reject(error);
-            }
-        };
-        timer = setInterval(checkStatus, checkInterval);
-        checkStatus();
-    });
-}
-module.exports = { downloadVideo };
+module.exports = {
+    downloadVideo,
+    formatCaption,
+    formatMetadata,
+    EMOJI_MAP
+};
 ```
 
 ## File: db.js
 ```javascript
 const { MongoClient } = require('mongodb');
 require('dotenv').config();
-const MONGO_URI = process.env.MONGO_URI;
-const DB_NAME = 'scraper';
-const RESOLUTIONS = ['480p', '720p', '1080p'];
-let client = null;
-async function connectToDb() {
-  if (!client) {
-    client = new MongoClient(MONGO_URI);
-    await client.connect();
-    console.log('Connected to MongoDB');
-  }
-  return client;
-}
-async function getDb() {
-  await connectToDb();
-  return client.db(DB_NAME);
-}
-async function getCollection(collectionName) {
-  const db = await getDb();
-  return db.collection(collectionName);
-}
-async function closeConnection() {
-  if (client) {
-    await client.close();
-    console.log('MongoDB connection closed');
-    client = null;
-  }
-}
-async function processAllPosts(scrapeCallback) {
-  const collection = await getCollection('posts');
-  const cursor = collection.find({
-    isScraped: true,
-    $or: RESOLUTIONS.map(res => ({
-      [res]: { $exists: true },
-      $and: [
-        { [`directUrls.${res}`]: { $exists: false } },
-        { [`skippedUrls.${res}`]: { $exists: false } }
-      ]
-    }))
-  }).batchSize(1);
-  while (await cursor.hasNext()) {
-    const doc = await cursor.next();
-    console.log(`\nProcessing document ${doc._id} - ${doc.title}`);
-    try {
-      await processDocument(doc, collection, scrapeCallback);
-      console.log(`✅ Completed processing document ${doc._id}`);
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    } catch (error) {
-      console.error(`❌ Error processing document ${doc._id}:`, error);
-    }
-  }
-}
-async function processDocument(doc, collection, scrapeCallback) {
-  const updates = {
-    directUrls: {},
-    errors: {},
-    processingLog: [],
-    skippedUrls: {}
-  };
-  for (const res of RESOLUTIONS) {
-    const url = doc[res];
-    if (!url) continue;
-    if (doc.uploadedToTelegram?.[res]) {
-      console.log(`📤 Skipping ${res} - already uploaded to Telegram`);
-      updates.processingLog.push(`${new Date().toISOString()} - ${res} already uploaded to Telegram`);
-      continue;
-    }
-    if (updates.directUrls[res]) {
-      console.log(`Skipping already processed URL: ${updates.directUrls[res]}`);
-      updates.skippedUrls[res] = {
-        url: updates.directUrls[res],
-        reason: 'Already processed'
-      };
-      continue;
-    }
-    try {
-      updates.processingLog.push(`${new Date().toISOString()} - Starting ${res} processing`);
-      const result = await scrapeCallback(url, doc, res);
-      if (result && result.skipped) {
-        updates.skippedUrls[res] = {
-          url: result.url,
-          reason: result.reason
-        };
-        updates.processingLog.push(`${new Date().toISOString()} - ${res} skipped: ${result.reason}`);
-      } else {
-        updates.directUrls[res] = result;
-        updates.processingLog.push(`${new Date().toISOString()} - ${res} success: ${result}`);
-        await collection.updateOne(
-          { _id: doc._id },
-          {
-            $set: {
-              [`directUrls.${res}`]: result,
-              lastProcessed: new Date(),
-              processingLog: updates.processingLog
-            }
-          }
-        );
-      }
-      await new Promise(resolve => setTimeout(resolve, 2000));
-    } catch (error) {
-      updates.errors[res] = {
-        message: error.message,
-        stack: error.stack
-      };
-      updates.processingLog.push(`${new Date().toISOString()} - ${res} error: ${error.message}`);
-      await collection.updateOne(
-        { _id: doc._id },
-        {
-          $set: {
-            [`errors.${res}`]: {
-              message: error.message,
-              stack: error.stack
-            },
-            processingLog: updates.processingLog
-          }
-        }
-      );
-    }
-  }
-  await collection.updateOne(
-    { _id: doc._id },
-    {
-      $set: updates,
-      $inc: { processingAttempts: 1 }
-    }
-  );
-}
+const client = new MongoClient(process.env.MONGO_URI, {
+  maxPoolSize: 5,
+  minPoolSize: 1,
+  connectTimeoutMS: 3000,
+  serverSelectionTimeoutMS: 3000,
+  socketTimeoutMS: 2000
+});
+let dbConnection = null;
+let isConnecting = false;
 module.exports = {
-  getDb,
-  getCollection,
-  closeConnection,
-  processAllPosts,
-  processDocument,
+  connect: async () => {
+    if (dbConnection) return dbConnection;
+    if (isConnecting) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      return dbConnection;
+    }
+    try {
+      isConnecting = true;
+      await client.connect();
+      dbConnection = client.db(process.env.MONGO_DB);
+      console.log('✅ MongoDB Connected');
+      return dbConnection;
+    } catch (error) {
+      console.error('❌ MongoDB Connection Failed:', error);
+      throw error;
+    } finally {
+      isConnecting = false;
+    }
+  },
+  connect: async () => {
+    if (dbConnection) {
+      console.log('[MongoDB] Using existing connection');
+      return dbConnection;
+    }
+    console.log('[MongoDB] Establishing new connection...');
+    if (isConnecting) {
+      console.log('[MongoDB] Waiting for existing connection attempt...');
+      while (isConnecting) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return dbConnection;
+    }
+    try {
+      isConnecting = true;
+      await client.connect();
+      dbConnection = client.db(process.env.MONGO_DB);
+      console.log('📦 Connected to MongoDB (new connection)');
+      client.on('serverClosed', (e) => console.log('[MongoDB] Connection closed:', e));
+      client.on('serverOpening', (e) => console.log('[MongoDB] Reconnecting:', e));
+      client.on('serverHeartbeatFailed', (e) => console.error('[MongoDB] Heartbeat failed:', e));
+      return dbConnection;
+    } catch (error) {
+      console.error('[MongoDB] Connection failed:', error);
+      throw error;
+    } finally {
+      isConnecting = false;
+    }
+  },
+  getCollection: async (name) => {
+    const db = await module.exports.connect();
+    return db.collection(name);
+  },
+  close: async () => {
+    if (client) {
+      await client.close();
+      dbConnection = null;
+      console.log('📦 MongoDB connection closed');
+    }
+  },
+  PROCESSING_STATUS: Object.freeze({
+    PENDING: 'pending',
+    DOWNLOADING: 'downloading',
+    READY_FOR_ARIA2: 'ready_for_aria2',
+    DOWNLOADING_ARIA2: 'downloading_aria2',
+    READY_FOR_TELEGRAM: 'ready_for_telegram',
+    UPLOADING_TELEGRAM: 'uploading_telegram',
+    COMPLETED: 'completed',
+    ERROR: 'error'
+  })
 };
+```
+
+## File: docker-compose.yml
+```yaml
+services:
+  app:
+    build: .
+    container_name: download-scraper
+    restart: unless-stopped
+    ports:
+      - "1234:1234"
+    volumes:
+      - ./downloads:/aria2/data
+      - ./chrome-data:/app/chrome-data:rw,z
+    environment:
+      - NODE_ENV=production
+      - ARIA2_HOST=aria2
+      - ARIA2_PORT=6800
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - TELEGRAM_STRING_SESSION=${TELEGRAM_STRING_SESSION}
+      - TELEGRAM_CHANNEL_ID=${TELEGRAM_CHANNEL_ID}
+      - ARIA2_SECRET=${ARIA2_SECRET}
+      - MONGO_URI=${MONGO_URI}
+      - ARIA2_DOWNLOAD_DIR=/aria2/data
+    user: "1000:1000"
+    depends_on:
+      - aria2
+  aria2:
+    image: p3terx/aria2-pro:latest
+    container_name: aria2
+    ports:
+      - "6800:6800"
+      - "6888:6888"
+      - "6888:6888/udp"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - RPC_SECRET=P3TERX
+      - RPC_PORT=6800
+    volumes:
+      - ./downloads:/aria2/data
+      - aria2_config:/config
+    restart: unless-stopped
+volumes:
+  aria2_config:
 ```
 
 ## File: Dockerfile
@@ -426,6 +630,8 @@ RUN npm install --production --omit=dev
 
 # Copy application files
 COPY --chown=node:node . .
+RUN ls -la /app/
+
 
 # Switch to non-root user
 USER node
@@ -434,7 +640,7 @@ USER node
 EXPOSE 1234
 
 # Start application with Xvfb wrapper
-CMD ["sh", "-c", "Xvfb :99 -ac -screen 0 $XVFB_WHD -nolisten tcp & npm start"]
+CMD ["sh", "-c", "rm -f /tmp/.X99-lock && Xvfb :99 -ac -screen 0 $XVFB_WHD -nolisten tcp & npm start"]
 ```
 
 ## File: generate_session.js
@@ -463,217 +669,38 @@ const apiHash = process.env.TELEGRAM_API_HASH;
 ## File: index.js
 ```javascript
 const { connect } = require("puppeteer-real-browser");
-const { processAllPosts, closeConnection } = require('./db');
-const { downloadVideo } = require('./aria2');
-const https = require('https');
-const os = require('os');
-const path = require('path');
 const fs = require('fs');
-function getFileSize(url) {
-  return new Promise((resolve, reject) => {
-    console.log('🔍 Checking file size for URL:', url);
-    const request = https.get(url, (response) => {
-      console.log('📨 Response headers:', response.headers);
-      console.log('📊 Response status code:', response.statusCode);
-      if (response.statusCode === 302 || response.statusCode === 301) {
-        console.log('🔄 Following redirect to:', response.headers.location);
-        return getFileSize(response.headers.location)
-          .then(resolve)
-          .catch(reject);
-      }
-      if (response.statusCode !== 200) {
-        reject(new Error(`HTTP status code ${response.statusCode}`));
-        return;
-      }
-      const contentLength = response.headers['content-length'];
-      if (!contentLength) {
-        console.log('⚠️ No content-length header found in response');
-        resolve(null);
-        return;
-      }
-      const size = parseInt(contentLength, 10);
-      const sizeInMB = (size / (1024 * 1024)).toFixed(2);
-      console.log(`📦 File size: ${sizeInMB} MB`);
-      resolve(size);
-    });
-    request.on('error', (error) => {
-      console.error('❌ Error during size check:', error.message);
-      resolve(null);
-    });
-    request.setTimeout(60000, () => {
-      request.destroy();
-      console.log('⚠️ Size check timeout - continuing with download anyway');
-      resolve(null);
-    });
-    request.end();
-  });
-}
+const { close } = require('./db');
+const { processUrl } = require('./processors');
+const { downloadVideo, formatMetadata } = require('./aria2');
+const DownloadWorker = require('./workers/downloadWorker');
+const Aria2Worker = require('./workers/aria2Worker');
+const TelegramWorker = require('./workers/telegramWorker');
+const { delay } = require('./utils');
 function waitRandom(min, max) {
   const delay = Math.floor(Math.random() * (max - min + 1)) + min;
   return new Promise(resolve => setTimeout(resolve, delay));
 }
-async function processUrl(url, doc, resolution, retryAttempt = 0) {
-  const maxRetries = 2;
-  let browser, page;
-  let tempDir = null;
+async function main() {
   try {
-    tempDir = path.join(os.tmpdir(), `chrome-data-${Date.now()}`);
-    fs.mkdirSync(tempDir, { recursive: true });
-    const connection = await connect({
-      headless: false,
-      turnstile: true,
-      disableXvfb: false,
-      defaultViewport: null,
-    });
-    browser = connection.browser;
-    page = connection.page;
-    await page.setDefaultNavigationTimeout(0);
-    await page.setDefaultTimeout(120000);
-    await page.setJavaScriptEnabled(true);
-    await page.setBypassCSP(true);
-    page.on('popup', async popup => {
-      const popupUrl = popup.url();
-      if (!popupUrl.includes('download') && !popupUrl.includes('cloudflare')) {
-        await popup.close();
-        console.log('🚫 Blocked non-essential popup:', popupUrl);
-      } else {
-        console.log('🔵 Allowing download-related popup:', popupUrl);
-      }
-    });
-    await page.evaluateOnNewDocument(() => {
-      window.open = function() {};
-      window.alert = function() {};
-      window.confirm = function() { return true; };
-      window.prompt = function() { return null; };
-      Event.prototype.stopPropagation = function() {};
-    });
-    await page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: 120000
-    });
-    console.log('🟠 Waiting for Cloudflare Turnstile captcha to be solved...');
-    await page.waitForFunction(() => {
-      const input = document.querySelector('input[name="cf-turnstile-response"]');
-      return input && input.value && input.value.trim().length > 30;
-    }, { timeout: 300000 });
-    await waitRandom(1000, 3000);
-    console.log('🟢 Captcha solved! Initiating download...');
-    let targetFrame = null;
-    for (const frame of page.frames()) {
-      try {
-        await frame.waitForSelector('#download-button', { timeout: 15000 });
-        targetFrame = frame;
-        break;
-      } catch (err) {
-      }
-    }
-    if (!targetFrame) {
-      throw new Error("Could not find frame with #download-button");
-    }
-    const [response] = await Promise.all([
-      page.waitForNavigation({
-        waitUntil: 'domcontentloaded',
-        timeout: 60000
-      }),
-      targetFrame.evaluate(() => {
-        const btn = document.querySelector('#download-button');
-        if (btn) {
-          btn.click();
-        }
-      })
-    ]);
-    await page.waitForFunction(() => {
-      const el = document.querySelector('#vd');
-      return el && el.offsetHeight > 0 && el.href && el.href.length > 100;
-    }, { timeout: 120000, polling: 'raf' });
-    const videoUrl = await page.$eval('#vd', el => el.href);
-    try {
-        const sizeInBytes = await getFileSize(videoUrl);
-        const sizeInGB = sizeInBytes / (1024 * 1024 * 1024);
-        if (sizeInGB > 2) {
-            console.log('⚠️ File size exceeds 2GB limit:', sizeInGB.toFixed(2), 'GB');
-            return {
-                skipped: true,
-                reason: `File size (${sizeInGB.toFixed(2)}GB) exceeds 2GB limit`,
-                url: videoUrl
-            };
-        }
-        console.log('✅ Verified download URL:', videoUrl);
-        const downloadResult = await downloadVideo(videoUrl, process.env.ARIA2_DOWNLOAD_DIR, {
-            ...doc,
-            resolution: resolution,
-            Movie: doc.title,
-            Language: doc.language,
-            'Original Language': doc.originalLanguage,
-            Runtime: doc.runtime,
-            Genres: doc.genres?.join(', ')
-        });
-        if (!downloadResult.success) {
-            console.error('❌ Download failed:', downloadResult.reason);
-            return {
-                skipped: true,
-                reason: downloadResult.reason,
-                url: videoUrl
-            };
-        }
-        console.log('Aria2 download result:', downloadResult);
-        return videoUrl;
-    } catch (error) {
-        console.error('❌ File size check failed:', error.message);
-        console.log('⚠️ Proceeding with download without size check');
-        const downloadResult = await downloadVideo(videoUrl, process.env.ARIA2_DOWNLOAD_DIR, {
-            ...doc,
-            resolution: resolution,
-            Movie: doc.title,
-            Language: doc.language,
-            'Original Language': doc.originalLanguage,
-            Runtime: doc.runtime,
-            Genres: doc.genres?.join(', ')
-        });
-        if (!downloadResult.success) {
-            throw new Error(downloadResult.reason || 'Download failed');
-        }
-        console.log('Aria2 download result:', downloadResult);
-        return videoUrl;
-    }
+    console.log('🚀 Initializing workers...');
+    const workers = {
+      download: new DownloadWorker(),
+      aria2: new Aria2Worker(),
+      telegram: new TelegramWorker()
+    };
+    await workers.download.start();
+    await delay(2000);
+    await workers.aria2.start();
+    await delay(2000);
+    await workers.telegram.start();
+    console.log('✅ All workers running');
   } catch (error) {
-    console.error('❌ Critical error:', error);
-    if (retryAttempt < maxRetries) {
-      console.log(`Retrying... Attempt ${retryAttempt + 1} of ${maxRetries}`);
-      return processUrl(url, doc, resolution, retryAttempt + 1);
-    }
-    throw error;
-  } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (err) {
-        console.log('Browser close error:', err.message);
-      }
-    }
-    if (tempDir && fs.existsSync(tempDir)) {
-      try {
-        fs.rmSync(tempDir, { recursive: true, force: true });
-      } catch (e) {
-        console.log('Failed to clean up temp directory:', e.message);
-      }
-    }
+    console.error('🔥 Critical error:', error);
+    process.exit(1);
   }
 }
-['./chrome-data', './chrome-data/temp'].forEach(dir => {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
-    }
-});
-processAllPosts(processUrl)
-  .then(() => {
-    console.log('All posts processed successfully.');
-    return closeConnection();
-  })
-  .catch(err => {
-    console.error('Error during post processing:', err);
-    return closeConnection();
-  });
+main().catch(console.error);
 ```
 
 ## File: package.json
@@ -682,6 +709,7 @@ processAllPosts(processUrl)
     "name": "download-scraper",
     "version": "1.0.0",
     "main": "index.js",
+    "type": "commonjs",
     "scripts": {
         "start": "node index.js"
     },
@@ -692,9 +720,110 @@ processAllPosts(processUrl)
         "download-scraper": "file:",
         "mongodb": "^6.3.0",
         "puppeteer-real-browser": "^1.4.0",
+        "repomix": "^0.2.28",
         "telegram": "^2.26.22"
     }
 }
+```
+
+## File: processors.js
+```javascript
+const { downloadVideo } = require('./aria2');
+const { delay } = require('./utils');
+const { getFileSize } = require('./utils');
+const { waitRandom } = require('./utils');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const https = require('https');
+const { connect } = require('puppeteer-real-browser');
+async function processUrl(url, doc, resolution, retryAttempt = 0) {
+    const maxRetries = 2;
+    let browser, page;
+    let tempDir = null;
+    try {
+        tempDir = path.join(os.tmpdir(), `chrome-data-${Date.now()}`);
+        fs.mkdirSync(tempDir, { recursive: true });
+        const connection = await connect({
+            headless: false,
+            turnstile: true,
+            disableXvfb: false,
+            defaultViewport: null,
+        });
+        browser = connection.browser;
+        page = connection.page;
+        await page.setDefaultNavigationTimeout(0);
+        await page.setDefaultTimeout(120000);
+        await page.setJavaScriptEnabled(true);
+        await page.setBypassCSP(true);
+        page.on('popup', async popup => {
+            const popupUrl = popup.url();
+            if (!popupUrl.includes('download') && !popupUrl.includes('cloudflare')) {
+                await popup.close();
+                console.log('🚫 Blocked non-essential popup:', popupUrl);
+            }
+        });
+        await page.evaluateOnNewDocument(() => {
+            window.open = function() {};
+            window.alert = function() {};
+            window.confirm = function() { return true; };
+            window.prompt = function() { return null; };
+            Event.prototype.stopPropagation = function() {};
+        });
+        await page.goto(url, {
+            waitUntil: 'networkidle2',
+            timeout: 120000
+        });
+        console.log('🟠 Waiting for Cloudflare Turnstile captcha to be solved...');
+        await page.waitForFunction(() => {
+            const input = document.querySelector('input[name="cf-turnstile-response"]');
+            return input?.value?.trim().length > 30;
+        }, {
+            timeout: 600000,
+            polling: 'raf'
+        });
+        await waitRandom(1000, 3000);
+        console.log('🟢 Captcha solved! Initiating download...');
+        const frames = await page.frames();
+        const targetFrame = frames.find(frame =>
+            frame.url().includes('download') ||
+            frame.url().includes('video')
+        );
+        if (!targetFrame) {
+            throw new Error("Could not find download frame");
+        }
+        const [response] = await Promise.all([
+            page.waitForNavigation({
+                waitUntil: 'domcontentloaded',
+                timeout: 60000
+            }),
+            targetFrame.click('#download-button')
+        ]);
+        await page.waitForFunction(() => {
+            const el = document.querySelector('#vd');
+            return el?.href?.length > 100;
+        }, { timeout: 120000, polling: 'raf' });
+        const videoUrl = await page.$eval('#vd', el => el.href);
+        return videoUrl;
+    } catch (error) {
+        console.error('❌ Processing error:', error);
+        if (retryAttempt < maxRetries) {
+            console.log(`Retrying... Attempt ${retryAttempt + 1} of ${maxRetries}`);
+            return processUrl(url, doc, resolution, retryAttempt + 1);
+        }
+        throw error;
+    } finally {
+        if (browser) {
+            await browser.close().catch(console.error);
+        }
+        if (tempDir) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+    }
+}
+module.exports = {
+    processUrl
+};
 ```
 
 ## File: telegram.js
@@ -715,14 +844,18 @@ async function initializeClient() {
             throw new Error('Missing required Telegram credentials in environment variables');
         }
         client = new TelegramClient(stringSession, parseInt(apiId), apiHash, {
-            connectionRetries: 5,
-            maxConcurrentDownloads: 1,
-            useWSS: false,
-            requestRetries: 5,
-            downloadRetries: 5,
-            uploadRetries: 5,
-            retryDelay: 2000,
-            workers: 4
+            connectionRetries: 10,
+            maxConcurrentDownloads: 8,
+            useWSS: true,
+            requestRetries: 3,
+            downloadRetries: 3,
+            uploadRetries: 3,
+            retryDelay: 1000,
+            workers: 8,
+            maxUploadParts: 4000,
+            dcId: 2,
+            useIPV6: false,
+            timeout: 30000
         });
         await client.connect();
         const me = await client.getMe();
@@ -757,22 +890,27 @@ async function uploadToTelegram(filePath, caption = '') {
         }
         let lastProgress = 0;
         let lastProgressUpdate = Date.now();
-        const PROGRESS_UPDATE_INTERVAL = 2000;
+        const PROGRESS_UPDATE_INTERVAL = 1000;
         const result = await client.sendFile(channelId, {
             file: filePath,
             caption: caption,
             progressCallback: (progress) => {
                 const now = Date.now();
-                const currentProgress = Math.floor(progress.percent);
-                console.log(`⬆️ Upload progress: ${currentProgress}% (Uploaded: ${progress.loaded} bytes)`);
-                if (currentProgress >= lastProgress + 5 && now - lastProgressUpdate >= PROGRESS_UPDATE_INTERVAL) {
-                    console.log(`⬆️ Upload progress: ${currentProgress}%`);
-                    lastProgress = currentProgress;
-                    lastProgressUpdate = now;
+                if (typeof progress === 'number' && progress >= 0 && progress <= 1) {
+                    const currentProgress = Math.floor(progress * 100);
+                    const uploadedBytes = Math.floor(fileSize * progress);
+                    const uploadedMB = (uploadedBytes / (1024 * 1024)).toFixed(2);
+                    console.log(`⬆️ Upload progress: ${currentProgress}% (${uploadedMB}MB/${fileSizeInMB.toFixed(2)}MB)`);
+                    if (currentProgress >= lastProgress + 5 && now - lastProgressUpdate >= PROGRESS_UPDATE_INTERVAL) {
+                        lastProgress = currentProgress;
+                        lastProgressUpdate = now;
+                    }
                 }
             },
-            workers: 4,
+            workers: 8,
             forceDocument: true,
+            partSize: 1024 * 1024,
+            noWait: true,
             attributes: [
                 new Api.DocumentAttributeFilename({
                     fileName: path.basename(filePath)
@@ -791,19 +929,11 @@ async function uploadToTelegram(filePath, caption = '') {
         };
     } catch (error) {
         console.error('❌ Telegram upload error:', error);
-        if (error.code === 'ENOENT') {
-            console.error('❌ File not found or inaccessible. Check the file path and permissions.');
-        } else if (error.code === 'EACCES' || error.code === 'EPERM') {
-            console.error('❌ Permission denied. Check file and directory permissions.');
-        } else if (error.message.includes('AUTH_KEY_UNREGISTERED')) {
-            throw new Error('❌ Telegram session expired. Please regenerate string session.');
-        } else if (error.message.includes('FLOOD_WAIT_')) {
+        if (error.message.includes('FLOOD_WAIT_')) {
             const seconds = parseInt(error.message.match(/FLOOD_WAIT_(\d+)/)[1]);
             console.warn(`⏳ Flood wait error. Retrying in ${seconds} seconds...`);
             await new Promise(res => setTimeout(res, seconds * 1000));
             return uploadToTelegram(filePath, caption);
-        } else if (error.message.includes('FILE_REFERENCE_')) {
-            throw new Error('❌ File reference expired. Please try uploading again.');
         }
         throw error;
     }
@@ -830,4 +960,64 @@ process.on('SIGTERM', async () => {
     process.exit(0);
 });
 module.exports = { uploadToTelegram, closeClient };
+```
+
+## File: utils.js
+```javascript
+module.exports = {
+  delay: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
+  waitRandom: (min, max) => {
+      const delay = Math.floor(Math.random() * (max - min + 1)) + min;
+      return new Promise(resolve => setTimeout(resolve, delay));
+  },
+  getFileSize: function(url) {
+      const https = require('https');
+      return new Promise((resolve, reject) => {
+          console.log('🔍 Checking file size for URL:', url);
+          const request = https.get(url, (response) => {
+              if (response.statusCode === 302 || response.statusCode === 301) {
+                  console.log('🔄 Following redirect to:', response.headers.location);
+                  return this.getFileSize(response.headers.location)
+                      .then(resolve)
+                      .catch(reject);
+              }
+              const contentLength = response.headers['content-length'];
+              resolve(contentLength ? parseInt(contentLength, 10) : null);
+          });
+          request.on('error', reject);
+          request.setTimeout(120000, () => {
+              request.destroy();
+              resolve(null);
+          });
+      });
+  },
+  formatSpeed: (bytesPerSecond) => {
+      const units = ["B/s", "KB/s", "MB/s", "GB/s"];
+      let speed = bytesPerSecond;
+      let unitIndex = 0;
+      while (speed >= 1024 && unitIndex < units.length - 1) {
+          speed /= 1024;
+          unitIndex++;
+      }
+      return `${speed.toFixed(1)} ${units[unitIndex]}`;
+  },
+  withRetry: async (fn, retries = 3, delayMs = 1000) => {
+      try {
+          return await fn();
+      } catch (error) {
+          if (retries <= 0) throw error;
+          await module.exports.delay(delayMs);
+          return module.exports.withRetry(fn, retries - 1, delayMs * 2);
+      }
+  },
+  sanitizeMetadata: (doc) => ({
+      title: String(doc.title || "").trim(),
+      language: String(doc.language || "").trim(),
+      originalLanguage: String(doc.originalLanguage || "").trim(),
+      runtime: String(doc.runtime || "").trim(),
+      genres: Array.isArray(doc.genres) ?
+          doc.genres.filter(Boolean).map(String) :
+          []
+  })
+};
 ```

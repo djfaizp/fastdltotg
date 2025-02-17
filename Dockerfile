@@ -1,4 +1,4 @@
-FROM node:18-bullseye
+FROM node:latest
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -27,6 +27,8 @@ RUN npm install --production --omit=dev
 
 # Copy application files
 COPY --chown=node:node . .
+RUN ls -la /app/
+
 
 # Switch to non-root user
 USER node
@@ -35,4 +37,4 @@ USER node
 EXPOSE 1234
 
 # Start application with Xvfb wrapper
-CMD ["sh", "-c", "Xvfb :99 -ac -screen 0 $XVFB_WHD -nolisten tcp & npm start"]
+CMD ["sh", "-c", "rm -f /tmp/.X99-lock && Xvfb :99 -ac -screen 0 $XVFB_WHD -nolisten tcp & npm start"]

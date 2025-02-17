@@ -7,4 +7,3 @@ aria2-config
 error-screenshot-*.png
 .env
 .dockerignore
-docker-compose.yml

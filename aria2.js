@@ -25,10 +25,23 @@ const aria2Config = {
 let aria2Instance = null;
 const getAria2Client = () => {
     if (!aria2Instance) {
-        aria2Instance = new Aria2(aria2Config);
+      aria2Instance = new Aria2(aria2Config);
+      
+      // Add error handlers
+      aria2Instance.on('error', (err) => {
+        console.error('❌ Aria2 connection error:', err);
+        aria2Instance = null;  // Force reconnect on next call
+      });
+  
+      aria2Instance.on('open', () => 
+        console.log('✅ Aria2 connection established'));
+        
+      aria2Instance.on('close', () => 
+        console.warn('⚠️ Aria2 connection closed'));
     }
     return aria2Instance;
-};
+  };
+  
 
 // Cache emoji map
 const EMOJI_MAP = Object.freeze({
