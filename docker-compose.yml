@@ -6,11 +6,11 @@ services:
     ports:
       - "1234:1234"
     volumes:
-      - ./downloads:/aria2/data
+      - ./downloads:/app/downloads:rw
       - ./chrome-data:/app/chrome-data:rw,z
     environment:
       - NODE_ENV=production
-      - ARIA2_HOST=aria2
+      - ARIA2_HOST=localhost
       - ARIA2_PORT=6800
       - TELEGRAM_API_ID=${TELEGRAM_API_ID}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
@@ -20,24 +20,6 @@ services:
       - MONGO_URI=${MONGO_URI}
       - ARIA2_DOWNLOAD_DIR=/aria2/data
     user: "1000:1000"
-    depends_on:
-      - aria2
-  aria2:
-    image: p3terx/aria2-pro:latest
-    container_name: aria2
-    ports:
-      - "6800:6800"
-      - "6888:6888"
-      - "6888:6888/udp"
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - RPC_SECRET=P3TERX
-      - RPC_PORT=6800
-    volumes:
-      - ./downloads:/aria2/data
-      - aria2_config:/config
-    restart: unless-stopped
 
 volumes:
   aria2_config:

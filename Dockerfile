@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     chromium \
     chromium-driver \
     xvfb \
+    aria2 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CHROME_BIN=/usr/bin/chromium
@@ -18,9 +19,23 @@ COPY package*.json ./
 
 RUN npm update
 RUN npm install
-RUN npm i -g pm2
 COPY . .
 
 EXPOSE 1234
 
-CMD ["pm2-runtime", "src/index.js"]
+# Create aria2 config directory and set permissions
+RUN mkdir -p /etc/aria2 && \
+    chmod 755 /etc/aria2 && \
+    touch /etc/aria2/aria2.conf && \
+    chmod 644 /etc/aria2/aria2.conf && \
+    echo "disable-ipv6=true" >> /etc/aria2/aria2.conf && \
+    echo "rpc-listen-all=true" >> /etc/aria2/aria2.conf && \
+    echo "rpc-allow-origin-all=true" >> /etc/aria2/aria2.conf && \
+    echo "rpc-listen-port=6800" >> /etc/aria2/aria2.conf && \
+    echo "enable-rpc=true" >> /etc/aria2/aria2.conf && \
+    echo "rpc-secret=P3TERX" >> /etc/aria2/aria2.conf
+
+
+
+RUN chmod +x start.sh
+CMD ["./start.sh"]

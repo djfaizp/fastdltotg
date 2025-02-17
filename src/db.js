@@ -1,40 +1,41 @@
 const { MongoClient } = require('mongodb');
+const NodeCache = require('node-cache');
 require('dotenv').config();
 
-const client = new MongoClient(process.env.MONGO_URI, {
-  maxPoolSize: 5,
-  minPoolSize: 1,
-  connectTimeoutMS: 3000,
-  serverSelectionTimeoutMS: 3000,
-  socketTimeoutMS: 2000
-});
+// Initialize cache with 5 minute TTL
+const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
+// Connection settings
+const connectionSettings = {
+  maxPoolSize: 10, // Increased from 5
+  minPoolSize: 2,
+  connectTimeoutMS: 5000,
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS: 3000,
+  retryWrites: true,
+  retryReads: true,
+  heartbeatFrequencyMS: 10000
+};
+
+const client = new MongoClient(process.env.MONGO_URI, connectionSettings);
 let dbConnection = null;
 let isConnecting = false;
 
+// Create indexes on startup
+async function createIndexes(db) {
+  try {
+    const postsCollection = db.collection('posts');
+    await postsCollection.createIndex({ processingStatus: 1 });
+    await postsCollection.createIndex({ isScraped: 1 });
+    await postsCollection.createIndex({ startedAt: -1 });
+    console.log('📦 MongoDB indexes created');
+  } catch (error) {
+    console.error('❌ Failed to create indexes:', error);
+  }
+}
+
 module.exports = {
-  connect: async () => {
-    if (dbConnection) return dbConnection;
-    if (isConnecting) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-      return dbConnection;
-    }
-
-    try {
-      isConnecting = true;
-      await client.connect();
-      dbConnection = client.db(process.env.MONGO_DB);
-      console.log('✅ MongoDB Connected');
-      return dbConnection;
-    } catch (error) {
-      console.error('❌ MongoDB Connection Failed:', error);
-      throw error;
-    } finally {
-      isConnecting = false;
-    }
-  },
-
-  connect: async () => {
+  connect: async (mongoDatabaseName) => {
     if (dbConnection) {
       console.log('[MongoDB] Using existing connection');
       return dbConnection;
@@ -52,29 +53,53 @@ module.exports = {
     try {
       isConnecting = true;
       await client.connect();
-      dbConnection = client.db(process.env.MONGO_DB);
+      dbConnection = client.db(mongoDatabaseName);
+      
+      // Create indexes on first connection
+      await createIndexes(dbConnection);
+      
       console.log('📦 Connected to MongoDB (new connection)');
       
       // Add error listeners
-      client.on('serverClosed', (e) => console.log('[MongoDB] Connection closed:', e));
-      client.on('serverOpening', (e) => console.log('[MongoDB] Reconnecting:', e));
-      client.on('serverHeartbeatFailed', (e) => console.error('[MongoDB] Heartbeat failed:', e));
+      client.on('serverClosed', (e) => {
+        console.log('[MongoDB] Connection closed:', e);
+        dbConnection = null;
+      });
+      
+      client.on('serverOpening', (e) => {
+        console.log('[MongoDB] Reconnecting:', e);
+      });
+      
+      client.on('serverHeartbeatFailed', (e) => {
+        console.error('[MongoDB] Heartbeat failed:', e);
+      });
       
       return dbConnection;
     } catch (error) {
       console.error('[MongoDB] Connection failed:', error);
-      throw error;  // Propagate error to caller
+      throw error;
     } finally {
       isConnecting = false;
     }
   },
 
-  
   getCollection: async (name) => {
-    const db = await module.exports.connect();
+    const db = await module.exports.connect(process.env.MONGO_DB);
     return db.collection(name);
   },
-  
+
+  getCachedCollection: async (name) => {
+    const cacheKey = `collection_${name}`;
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+    
+    const collection = await module.exports.getCollection(name);
+    cache.set(cacheKey, collection);
+    return collection;
+  },
+
   close: async () => {
     if (client) {
       await client.close();
@@ -82,7 +107,7 @@ module.exports = {
       console.log('📦 MongoDB connection closed');
     }
   },
-  
+
   PROCESSING_STATUS: Object.freeze({
     PENDING: 'pending',
     DOWNLOADING: 'downloading',

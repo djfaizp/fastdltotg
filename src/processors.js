@@ -1,53 +1,17 @@
 const { downloadVideo } = require('./aria2');
-const { delay } = require('./utils');
-const { getFileSize } = require('./utils');
-const { waitRandom } = require('./utils');  // Added missing import
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const https = require('https');
-const { connect } = require('puppeteer-real-browser');
+const { delay, getFileSize, waitRandom } = require('./utils');
+const browserManager = require('./utils/browser');
 
 async function processUrl(url, doc, resolution, retryAttempt = 0) {
     const maxRetries = 2;
-    let browser, page;
-    let tempDir = null;
+    let browserInstance;
     try {
-      console.log(`[Processors] Creating temporary directory for browser data...`);
-      tempDir = path.join(os.tmpdir(), `chrome-data-${Date.now()}`);
-      fs.mkdirSync(tempDir, { recursive: true });
+      console.log(`[Processors] Creating browser instance...`);
+      browserInstance = await browserManager.createBrowserInstance();
+      const page = browserInstance.page;
       
-      console.log(`[Processors] Connecting to browser...`);
-      const connection = await connect({
-        headless: false,
-        turnstile: true,
-        disableXvfb: false,
-        defaultViewport: null,
-      });
-      browser = connection.browser;
-      page = connection.page;
-      
-      console.log(`[Processors] Setting page timeouts and enabling JS...`);
-      await page.setDefaultNavigationTimeout(0);
-      await page.setDefaultTimeout(120000);
-      await page.setJavaScriptEnabled(true);
-      await page.setBypassCSP(true);
-  
-      page.on('popup', async popup => {
-        const popupUrl = popup.url();
-        if (!popupUrl.includes('download') && !popupUrl.includes('cloudflare')) {
-          console.log(`[Processors] Blocked non-essential popup: ${popupUrl}`);
-          await popup.close();
-        }
-      });
-  
-      await page.evaluateOnNewDocument(() => {
-        window.open = function() {};
-        window.alert = function() {};
-        window.confirm = function() { return true; };
-        window.prompt = function() { return null; };
-        Event.prototype.stopPropagation = function() {};
-      });
+      console.log(`[Processors] Configuring page...`);
+      await browserManager.configurePage(page);
   
       console.log(`[Processors] Navigating to URL: ${url}`);
       await page.goto(url, {
@@ -68,12 +32,33 @@ async function processUrl(url, doc, resolution, retryAttempt = 0) {
       await waitRandom(1000, 3000);
   
       console.log(`[Processors] Looking for download frame...`);
+      let targetFrame = null;
       const frames = await page.frames();
-      const targetFrame = frames.find(frame =>
-        frame.url().includes('download') || frame.url().includes('video')
-      );
-      if (!targetFrame) {
-        throw new Error("Could not find download frame");
+      
+      // First try: Look for frame with download button
+      for (const frame of frames) {
+        try {
+          const hasButton = await frame.evaluate(() => {
+            const btn = document.querySelector('#download-button');
+            return btn && btn.offsetParent !== null; // Check if button is visible
+          });
+          
+          if (hasButton) {
+            targetFrame = frame;
+            break;
+          }
+        } catch (err) {
+          continue; // Skip frames that can't be evaluated
+        }
+      }
+      // Verify frame is accessible and has required elements
+      try {
+        await targetFrame.waitForSelector('#download-button', {
+          visible: true,
+          timeout: 15000
+        });
+      } catch (error) {
+        throw new Error(`Download button not found in frame: ${error.message}`);
       }
   
       console.log(`[Processors] Found download frame, clicking download button...`);

@@ -10,7 +10,7 @@ if (!secret) {
     console.warn('⚠️ ARIA2_SECRET environment variable is not set!');
 }
 const aria2Config = {
-    host: "aria2",
+    host: process.env.ARIA2_HOST,
     port: 6800,
     secure: false,
     secret: process.env.ARIA2_SECRET,
