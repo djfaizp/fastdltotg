@@ -5,9 +5,11 @@ services:
     restart: unless-stopped
     ports:
       - "1234:1234"
+      - "6800:6800"
     volumes:
       - ./downloads:/app/downloads:rw
       - ./chrome-data:/app/chrome-data:rw,z
+      - aria2_config:/etc/aria2:rw
     environment:
       - NODE_ENV=production
       - ARIA2_HOST=localhost
@@ -18,8 +20,14 @@ services:
       - TELEGRAM_CHANNEL_ID=${TELEGRAM_CHANNEL_ID}
       - ARIA2_SECRET=${ARIA2_SECRET}
       - MONGO_URI=${MONGO_URI}
-      - ARIA2_DOWNLOAD_DIR=/aria2/data
+      - ARIA2_DOWNLOAD_DIR=/app/downloads
     user: "1000:1000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6800/jsonrpc"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
   aria2_config:

@@ -2,7 +2,7 @@ const { downloadVideo } = require('./aria2');
 const { delay, getFileSize, waitRandom } = require('./utils');
 const browserManager = require('./utils/browser');
 
-async function processUrl(url, doc, resolution, retryAttempt = 0) {
+async function processUrl(url, doc, resolution) {
     const maxRetries = 2;
     let browserInstance;
     try {
@@ -35,12 +35,11 @@ async function processUrl(url, doc, resolution, retryAttempt = 0) {
       let targetFrame = null;
       const frames = await page.frames();
       
-      // First try: Look for frame with download button
       for (const frame of frames) {
         try {
           const hasButton = await frame.evaluate(() => {
             const btn = document.querySelector('#download-button');
-            return btn && btn.offsetParent !== null; // Check if button is visible
+            return btn && btn.offsetParent !== null;
           });
           
           if (hasButton) {
@@ -48,21 +47,21 @@ async function processUrl(url, doc, resolution, retryAttempt = 0) {
             break;
           }
         } catch (err) {
-          continue; // Skip frames that can't be evaluated
+          continue;
         }
       }
-      // Verify frame is accessible and has required elements
-      try {
-        await targetFrame.waitForSelector('#download-button', {
-          visible: true,
-          timeout: 15000
-        });
-      } catch (error) {
-        throw new Error(`Download button not found in frame: ${error.message}`);
+
+      if (!targetFrame) {
+        throw new Error('Download frame not found');
       }
+
+      await targetFrame.waitForSelector('#download-button', {
+        visible: true,
+        timeout: 15000
+      });
   
       console.log(`[Processors] Found download frame, clicking download button...`);
-      const [response] = await Promise.all([
+      await Promise.all([
         page.waitForNavigation({
           waitUntil: 'domcontentloaded',
           timeout: 60000
@@ -78,22 +77,14 @@ async function processUrl(url, doc, resolution, retryAttempt = 0) {
       
       const videoUrl = await page.$eval('#vd', el => el.href);
       console.log(`[Processors] Successfully retrieved direct URL: ${videoUrl}`);
-      return videoUrl;
+      
+      return videoUrl;  // Make sure to return the URL
     } catch (error) {
       console.error('[Processors] Processing error:', error);
-      if (retryAttempt < maxRetries) {
-        console.log(`[Processors] Retrying... Attempt ${retryAttempt + 1} of ${maxRetries}`);
-        return processUrl(url, doc, resolution, retryAttempt + 1);
-      }
-      throw error;
+      throw error;  // Re-throw the error to be handled by the caller
     } finally {
-      if (browser) {
-        console.log(`[Processors] Closing browser...`);
-        await browser.close().catch(console.error);
-      }
-      if (tempDir) {
-        console.log(`[Processors] Removing temporary directory...`);
-        fs.rmSync(tempDir, { recursive: true, force: true });
+      if (browserInstance) {
+        await browserManager.closeBrowserInstance(browserInstance).catch(console.error);
       }
     }
   }

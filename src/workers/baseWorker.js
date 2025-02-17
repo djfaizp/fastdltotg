@@ -8,6 +8,7 @@ class BaseWorker {
     this.config = workerConfig;
     this.shouldRun = true;
     this.activeDocumentId = null;
+    this.workerId = Math.random().toString(36).substr(2, 9); // Add unique worker ID
   }
 
   async initialize() {
@@ -16,26 +17,26 @@ class BaseWorker {
 
   async start() {
     await this.initialize();
-    console.log(`[${this.config.workerName}] Starting worker`);
+    console.log(`[${this.config.workerName}:${this.workerId}] Starting worker`);
     while (this.shouldRun) {
       let doc; // Declare doc outside the try block for wider scope
       try {
-        console.log(`[${this.config.workerName}] Polling for documents...`);
+        console.log(`[${this.config.workerName}:${this.workerId}] Polling for documents...`);
         doc = await this.findNextDocument();
         if (!doc) {
           console.log(
-            `[${this.config.workerName}] No documents found. Retrying in ${this.config.pollingInterval}ms`
+            `[${this.config.workerName}:${this.workerId}] No documents found. Retrying in ${this.config.pollingInterval}ms`
           );
           await delay(this.config.pollingInterval);
           continue;
         }
   
         this.activeDocumentId = doc._id;
-        console.log(`[${this.config.workerName}] Processing document ${doc._id}`);
+        console.log(`[${this.config.workerName}:${this.workerId}] Processing document ${doc._id}`);
         await this.config.processDocument(doc, this.collection);
-        console.log(`[${this.config.workerName}] Completed processing document ${doc._id}`);
+        console.log(`[${this.config.workerName}:${this.workerId}] Completed processing document ${doc._id}`);
       } catch (error) {
-        console.error(`[${this.config.workerName}] Error in worker loop:`, error);
+        console.error(`[${this.config.workerName}:${this.workerId}] Error in worker loop:`, error);
         if (doc) await this.handleError(doc._id, error);
         await delay(this.config.errorRetryDelay);
       } finally {

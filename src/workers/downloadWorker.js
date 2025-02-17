@@ -34,34 +34,24 @@ class DownloadWorker extends BaseWorker {
 
         let browserInstance;
         try {
-          // Create browser instance using browser manager
           browserInstance = await browserManager.createBrowserInstance();
-          const browser = browserInstance.browser;
-
-          // Process each resolution with retry logic
+          
           for (const res of ['480p', '720p', '1080p']) {
             if (!doc[res]) continue;
             
             let retries = 3;
             while (retries > 0) {
               try {
-                updates.directUrls[res] = await processUrl(doc[res], doc, res, browser);
+                const directUrl = await processUrl(doc[res], doc, res);
+                if (directUrl) {
+                  updates.directUrls[res] = directUrl;
+                  logger.info(`[DownloadWorker] Got direct URL for ${res}: ${directUrl}`);
+                }
                 break;
               } catch (error) {
                 retries--;
                 if (retries === 0) {
-                  // Capture screenshot for debugging
-                  const page = await browser.newPage();
-                  try {
-                    await page.goto(doc[res]);
-                    await page.screenshot({ 
-                      path: `debug/${doc._id}-${res}-error.png`,
-                      fullPage: true 
-                    });
-                  } catch (screenshotError) {
-                    logger.error('Failed to capture screenshot:', screenshotError);
-                  }
-                  await page.close();
+                  logger.error(`[DownloadWorker] Failed to get direct URL for ${res} after all retries`);
                   throw error;
                 }
                 logger.warn(`[DownloadWorker] Retrying ${res} for ${doc._id}`);
@@ -70,25 +60,33 @@ class DownloadWorker extends BaseWorker {
             }
           }
 
-          await connection.close();
-        } catch (error) {
-          logger.error(`[DownloadWorker] Failed to process ${doc._id}:`, error);
-          updates.processingStatus = PROCESSING_STATUS.ERROR;
-          updates.error = error.message;
-        } finally {
-          if (browserInstance) {
-            await browserManager.closeBrowserInstance(browserInstance).catch(err =>
-              logger.error(`[DownloadWorker] Error closing browser:`, err)
-            );
-          }
-          try {
+          // Only update if we have at least one direct URL
+          if (Object.keys(updates.directUrls).length > 0) {
             await collection.updateOne(
               { _id: doc._id },
-              { $set: updates },
-              { timeout: 5000 }
+              { $set: updates }
             );
-          } catch (error) {
-            logger.error(`[DownloadWorker] Failed to update ${doc._id}:`, error);
+            logger.info(`[DownloadWorker] Updated document with direct URLs: ${JSON.stringify(updates.directUrls)}`);
+          } else {
+            throw new Error('No direct URLs were obtained');
+          }
+
+        } catch (error) {
+          logger.error(`[DownloadWorker] Failed to process ${doc._id}:`, error);
+          await collection.updateOne(
+            { _id: doc._id },
+            {
+              $set: {
+                processingStatus: PROCESSING_STATUS.ERROR,
+                error: error.message,
+                completedAt: new Date()
+              }
+            }
+          );
+        } finally {
+          if (browserInstance) {
+            await browserManager.closeBrowserInstance(browserInstance).catch(err => 
+              logger.error('[DownloadWorker] Error closing browser:', err));
           }
         }
       }
