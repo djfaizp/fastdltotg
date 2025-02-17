@@ -36,253 +36,136 @@ The content is organized as follows:
 
 # Directory Structure
 ```
-workers/
-  aria2Worker.js
-  baseWorker.js
-  downloadWorker.js
-  telegramWorker.js
-aria2.js
-db.js
+.dockerignore
 docker-compose.yml
 Dockerfile
-generate_session.js
-index.js
 package.json
-processors.js
-telegram.js
-utils.js
+src/aria2.js
+src/db.js
+src/generate_session.js
+src/index.js
+src/processors.js
+src/telegram.js
+src/utils.js
+src/workers/aria2Worker.js
+src/workers/baseWorker.js
+src/workers/downloadWorker.js
+src/workers/telegramWorker.js
 ```
 
 # Files
 
-## File: workers/aria2Worker.js
-```javascript
-const BaseWorker = require('./baseWorker');
-const { downloadVideo } = require('../aria2');
-const { PROCESSING_STATUS } = require('../db');
-class Aria2Worker extends BaseWorker {
-  constructor() {
-    super('posts', {
-      workerName: 'Aria2Worker',
-      pollingInterval: 5000,
-      errorRetryDelay: 10000,
-      documentFilter: {
-        processingStatus: PROCESSING_STATUS.READY_FOR_ARIA2,
-        directUrls: { $exists: true, $ne: {} }
-      },
-      initialStatusUpdate: {
-        $set: {
-          processingStatus: PROCESSING_STATUS.DOWNLOADING_ARIA2,
-          startedAt: new Date()
-        }
-      },
-      processDocument: async (doc, collection) => {
-        console.log(`[Aria2Worker] Processing direct URLs for ${doc._id}`);
-        for (const [resolution, url] of Object.entries(doc.directUrls)) {
-          console.log(`[Aria2Worker] Downloading ${resolution} from ${url}`);
-          if (!url || doc.uploadedToTelegram?.[resolution]) continue;
-          const downloadResult = await downloadVideo(
-            url,
-            process.env.ARIA2_DOWNLOAD_DIR,
-            { ...doc, resolution }
-          );
-          console.log(`[Aria2Worker] ${resolution} download completed for ${doc._id}`);
-          if (downloadResult.success) {
-            await collection.updateOne(
-              { _id: doc._id },
-              {
-                $set: {
-                  [`uploadedToTelegram.${resolution}`]: true,
-                  processingStatus: PROCESSING_STATUS.READY_FOR_TELEGRAM,
-                  completedAt: new Date()
-                }
-              }
-            );
-          }
-        }
-      }
-    });
-  }
-}
-module.exports = Aria2Worker;
+## File: .dockerignore
+```
+node_modules
+*.log
+.git
+error-screenshot-*.png
+.dockerignore
+*.md
+.repomixignore
+repomix.config.json
 ```
 
-## File: workers/baseWorker.js
-```javascript
-const { getCollection } = require('../db');
-const { PROCESSING_STATUS } = require('../db');
-const { delay } = require('../utils.js');
-class BaseWorker {
-  constructor(collectionName, workerConfig) {
-    this.collectionName = collectionName;
-    this.config = workerConfig;
-    this.shouldRun = true;
-    this.activeDocumentId = null;
-  }
-  async initialize() {
-    this.collection = await getCollection(this.collectionName);
-  }
-  async start() {
-    await this.initialize();
-    console.log(`[${this.config.workerName}] Starting worker`);
-    while (this.shouldRun) {
-      try {
-        console.log(`[${this.config.workerName}] Polling for documents...`);
-        const doc = await this.findNextDocument();
-        if (!doc) {
-          console.log(`[${this.config.workerName}] No documents found. Retrying in ${this.config.pollingInterval}ms`);
-          await delay(this.config.pollingInterval);
-          continue;
-        }
-        this.activeDocumentId = doc._id;
-        console.log(`[${this.config.workerName}] Processing document ${doc._id}`);
-        await this.config.processDocument(doc, this.collection);
-        console.log(`[${this.config.workerName}] Completed processing document ${doc._id}`);
-      } catch (error) {
-        console.error(`[${this.config.workerName}] Error in worker loop:`, error);
-        if (doc) await this.handleError(doc._id, error);
-        await delay(this.config.errorRetryDelay);
-      } finally {
-        this.activeDocumentId = null;
-      }
+## File: docker-compose.yml
+```yaml
+services:
+  app:
+    build: .
+    container_name: download-scraper
+    restart: unless-stopped
+    ports:
+      - "1234:1234"
+    volumes:
+      - ./downloads:/aria2/data
+      - ./chrome-data:/app/chrome-data:rw,z
+    environment:
+      - NODE_ENV=production
+      - ARIA2_HOST=aria2
+      - ARIA2_PORT=6800
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - TELEGRAM_STRING_SESSION=${TELEGRAM_STRING_SESSION}
+      - TELEGRAM_CHANNEL_ID=${TELEGRAM_CHANNEL_ID}
+      - ARIA2_SECRET=${ARIA2_SECRET}
+      - MONGO_URI=${MONGO_URI}
+      - ARIA2_DOWNLOAD_DIR=/aria2/data
+    user: "1000:1000"
+    depends_on:
+      - aria2
+  aria2:
+    image: p3terx/aria2-pro:latest
+    container_name: aria2
+    ports:
+      - "6800:6800"
+      - "6888:6888"
+      - "6888:6888/udp"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - RPC_SECRET=P3TERX
+      - RPC_PORT=6800
+    volumes:
+      - ./downloads:/aria2/data
+      - aria2_config:/config
+    restart: unless-stopped
+volumes:
+  aria2_config:
+```
+
+## File: Dockerfile
+```dockerfile
+FROM node:latest
+
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    ca-certificates \
+    apt-transport-https \
+    chromium \
+    chromium-driver \
+    xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CHROME_BIN=/usr/bin/chromium
+
+WORKDIR /app
+
+COPY package*.json ./
+
+RUN npm update
+RUN npm install
+RUN npm i -g pm2
+COPY . .
+
+EXPOSE 1234
+
+CMD ["pm2-runtime", "src/index.js"]
+```
+
+## File: package.json
+```json
+{
+    "name": "download-scraper",
+    "version": "1.0.0",
+    "main": "index.js",
+    "type": "commonjs",
+    "scripts": {
+        "start": "node src/index.js"
+    },
+    "dependencies": {
+        "aria2": "^4.1.2",
+        "dotenv": "^16.4.7",
+        "download-scraper": "file:",
+        "mongodb": "^6.3.0",
+        "puppeteer-real-browser": "^1.4.0",
+        "repomix": "^0.2.28",
+        "telegram": "^2.26.22"
     }
-  }
-  async stop() {
-    console.log(`[${this.config.workerName}] Stopping worker...`);
-    this.shouldRun = false;
-    while (this.activeDocumentId) {
-      console.log(`[${this.config.workerName}] Waiting for current document ${this.activeDocumentId} to finish...`);
-      await delay(1000);
-    }
-  }
-  async findNextDocument() {
-    return this.collection.findOneAndUpdate(
-      this.config.documentFilter,
-      this.config.initialStatusUpdate,
-      { returnDocument: 'after' }
-    );
-  }
-  async handleError(docId, error) {
-    console.error(`[${this.config.workerName}] Error processing ${docId}:`, error);
-    await this.collection.updateOne(
-      { _id: docId },
-      {
-        $set: {
-          processingStatus: PROCESSING_STATUS.ERROR,
-          error: error.message,
-          lastErrorAt: new Date()
-        }
-      }
-    );
-  }
 }
-module.exports = BaseWorker;
 ```
 
-## File: workers/downloadWorker.js
-```javascript
-const BaseWorker = require('./baseWorker');
-const { PROCESSING_STATUS } = require('../db');
-const { processUrl } = require('../processors');
-class DownloadWorker extends BaseWorker {
-  constructor() {
-    super('posts', {
-      workerName: 'DownloadWorker',
-      pollingInterval: 5000,
-      errorRetryDelay: 10000,
-      documentFilter: {
-        isScraped: true,
-        processingStatus: PROCESSING_STATUS.PENDING,
-        $or: [
-          { directUrls: { $exists: false } },
-          { directUrls: {} }
-        ]
-      },
-      initialStatusUpdate: {
-        $set: {
-          processingStatus: PROCESSING_STATUS.DOWNLOADING,
-          startedAt: new Date()
-        }
-      },
-      processDocument: async (doc, collection) => {
-        console.log(`[DownloadWorker] Processing ${doc._id}`);
-        const updates = {
-          directUrls: {},
-          processingStatus: PROCESSING_STATUS.READY_FOR_ARIA2,
-          completedAt: new Date()
-        };
-        try {
-          for (const res of ['480p', '720p', '1080p']) {
-            if (!doc[res]) continue;
-            updates.directUrls[res] = await processUrl(doc[res], doc, res);
-          }
-        } finally {
-          await collection.updateOne({ _id: doc._id }, { $set: updates });
-        }
-      }
-    });
-  }
-}
-module.exports = DownloadWorker;
-```
-
-## File: workers/telegramWorker.js
-```javascript
-const BaseWorker = require('./baseWorker');
-const { PROCESSING_STATUS } = require('../db');
-const { uploadToTelegram } = require('../telegram');
-const { formatCaption, formatMetadata } = require('../aria2');
-const path = require('path');
-class TelegramWorker extends BaseWorker {
-  constructor() {
-    super('posts', {
-      workerName: 'TelegramWorker',
-      pollingInterval: 5000,
-      errorRetryDelay: 10000,
-      documentFilter: {
-        processingStatus: PROCESSING_STATUS.READY_FOR_TELEGRAM,
-        uploadedToTelegram: { $exists: true }
-      },
-      initialStatusUpdate: {
-        $set: {
-          processingStatus: PROCESSING_STATUS.UPLOADING_TELEGRAM,
-          startedAt: new Date()
-        }
-      },
-      processDocument: async (doc, collection) => {
-        console.log(`[TelegramWorker] Processing uploads for ${doc._id}`);
-        for (const resolution of ['480p', '720p', '1080p']) {
-          console.log(`[TelegramWorker] Checking ${resolution} for upload`);
-          if (!doc.directUrls?.[resolution] || !doc.uploadedToTelegram?.[resolution]) continue;
-          const filePath = path.join(
-            process.env.ARIA2_DOWNLOAD_DIR,
-            path.basename(doc.directUrls[resolution])
-          );
-          const metadata = formatMetadata(doc, resolution);
-          const caption = formatCaption(metadata, path.basename(filePath));
-          const uploadResult = await uploadToTelegram(filePath, caption);
-          console.log(`[TelegramWorker] ${resolution} uploaded successfully`);
-          if (uploadResult.success) {
-            await collection.updateOne(
-              { _id: doc._id },
-              {
-                $set: {
-                  [`telegramLinks.${resolution}`]: uploadResult.messageLink,
-                  processingStatus: PROCESSING_STATUS.COMPLETED,
-                  completedAt: new Date()
-                }
-              }
-            );
-          }
-        }
-      }
-    });
-  }
-}
-module.exports = TelegramWorker;
-```
-
-## File: aria2.js
+## File: src/aria2.js
 ```javascript
 const Aria2 = require('aria2');
 const path = require('path');
@@ -467,7 +350,7 @@ module.exports = {
 };
 ```
 
-## File: db.js
+## File: src/db.js
 ```javascript
 const { MongoClient } = require('mongodb');
 require('dotenv').config();
@@ -549,101 +432,11 @@ module.exports = {
     UPLOADING_TELEGRAM: 'uploading_telegram',
     COMPLETED: 'completed',
     ERROR: 'error'
-  })
+  }),
 };
 ```
 
-## File: docker-compose.yml
-```yaml
-services:
-  app:
-    build: .
-    container_name: download-scraper
-    restart: unless-stopped
-    ports:
-      - "1234:1234"
-    volumes:
-      - ./downloads:/aria2/data
-      - ./chrome-data:/app/chrome-data:rw,z
-    environment:
-      - NODE_ENV=production
-      - ARIA2_HOST=aria2
-      - ARIA2_PORT=6800
-      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
-      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
-      - TELEGRAM_STRING_SESSION=${TELEGRAM_STRING_SESSION}
-      - TELEGRAM_CHANNEL_ID=${TELEGRAM_CHANNEL_ID}
-      - ARIA2_SECRET=${ARIA2_SECRET}
-      - MONGO_URI=${MONGO_URI}
-      - ARIA2_DOWNLOAD_DIR=/aria2/data
-    user: "1000:1000"
-    depends_on:
-      - aria2
-  aria2:
-    image: p3terx/aria2-pro:latest
-    container_name: aria2
-    ports:
-      - "6800:6800"
-      - "6888:6888"
-      - "6888:6888/udp"
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - RPC_SECRET=P3TERX
-      - RPC_PORT=6800
-    volumes:
-      - ./downloads:/aria2/data
-      - aria2_config:/config
-    restart: unless-stopped
-volumes:
-  aria2_config:
-```
-
-## File: Dockerfile
-```dockerfile
-FROM node:18-bullseye
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    chromium \
-    xvfb \
-    fonts-freefont-ttf \
-    fonts-roboto \
-    && rm -rf /var/lib/apt/lists/*
-
-# Environment variables for Puppeteer
-ENV CHROME_BIN=/usr/bin/chromium \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
-    DISPLAY=:99 \
-    XVFB_WHD=1280x1024x16
-
-# Create and configure directories
-RUN mkdir -p /app/chrome-data /downloads && \
-    chown -R node:node /app /downloads && \
-    chmod -R 755 /downloads
-
-WORKDIR /app
-
-# Copy package files and install dependencies
-COPY --chown=node:node package*.json ./
-RUN npm install --production --omit=dev
-
-# Copy application files
-COPY --chown=node:node . .
-RUN ls -la /app/
-
-
-# Switch to non-root user
-USER node
-
-# Expose application port
-EXPOSE 1234
-
-# Start application with Xvfb wrapper
-CMD ["sh", "-c", "rm -f /tmp/.X99-lock && Xvfb :99 -ac -screen 0 $XVFB_WHD -nolisten tcp & npm start"]
-```
-
-## File: generate_session.js
+## File: src/generate_session.js
 ```javascript
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
@@ -666,7 +459,7 @@ const apiHash = process.env.TELEGRAM_API_HASH;
 })();
 ```
 
-## File: index.js
+## File: src/index.js
 ```javascript
 const { connect } = require("puppeteer-real-browser");
 const fs = require('fs');
@@ -703,30 +496,7 @@ async function main() {
 main().catch(console.error);
 ```
 
-## File: package.json
-```json
-{
-    "name": "download-scraper",
-    "version": "1.0.0",
-    "main": "index.js",
-    "type": "commonjs",
-    "scripts": {
-        "start": "node index.js"
-    },
-    "dependencies": {
-        "aria2": "^4.1.2",
-        "cli-progress": "^3.12.0",
-        "dotenv": "^16.4.7",
-        "download-scraper": "file:",
-        "mongodb": "^6.3.0",
-        "puppeteer-real-browser": "^1.4.0",
-        "repomix": "^0.2.28",
-        "telegram": "^2.26.22"
-    }
-}
-```
-
-## File: processors.js
+## File: src/processors.js
 ```javascript
 const { downloadVideo } = require('./aria2');
 const { delay } = require('./utils');
@@ -742,91 +512,100 @@ async function processUrl(url, doc, resolution, retryAttempt = 0) {
     let browser, page;
     let tempDir = null;
     try {
-        tempDir = path.join(os.tmpdir(), `chrome-data-${Date.now()}`);
-        fs.mkdirSync(tempDir, { recursive: true });
-        const connection = await connect({
-            headless: false,
-            turnstile: true,
-            disableXvfb: false,
-            defaultViewport: null,
-        });
-        browser = connection.browser;
-        page = connection.page;
-        await page.setDefaultNavigationTimeout(0);
-        await page.setDefaultTimeout(120000);
-        await page.setJavaScriptEnabled(true);
-        await page.setBypassCSP(true);
-        page.on('popup', async popup => {
-            const popupUrl = popup.url();
-            if (!popupUrl.includes('download') && !popupUrl.includes('cloudflare')) {
-                await popup.close();
-                console.log('🚫 Blocked non-essential popup:', popupUrl);
-            }
-        });
-        await page.evaluateOnNewDocument(() => {
-            window.open = function() {};
-            window.alert = function() {};
-            window.confirm = function() { return true; };
-            window.prompt = function() { return null; };
-            Event.prototype.stopPropagation = function() {};
-        });
-        await page.goto(url, {
-            waitUntil: 'networkidle2',
-            timeout: 120000
-        });
-        console.log('🟠 Waiting for Cloudflare Turnstile captcha to be solved...');
-        await page.waitForFunction(() => {
-            const input = document.querySelector('input[name="cf-turnstile-response"]');
-            return input?.value?.trim().length > 30;
-        }, {
-            timeout: 600000,
-            polling: 'raf'
-        });
-        await waitRandom(1000, 3000);
-        console.log('🟢 Captcha solved! Initiating download...');
-        const frames = await page.frames();
-        const targetFrame = frames.find(frame =>
-            frame.url().includes('download') ||
-            frame.url().includes('video')
-        );
-        if (!targetFrame) {
-            throw new Error("Could not find download frame");
+      console.log(`[Processors] Creating temporary directory for browser data...`);
+      tempDir = path.join(os.tmpdir(), `chrome-data-${Date.now()}`);
+      fs.mkdirSync(tempDir, { recursive: true });
+      console.log(`[Processors] Connecting to browser...`);
+      const connection = await connect({
+        headless: false,
+        turnstile: true,
+        disableXvfb: false,
+        defaultViewport: null,
+      });
+      browser = connection.browser;
+      page = connection.page;
+      console.log(`[Processors] Setting page timeouts and enabling JS...`);
+      await page.setDefaultNavigationTimeout(0);
+      await page.setDefaultTimeout(120000);
+      await page.setJavaScriptEnabled(true);
+      await page.setBypassCSP(true);
+      page.on('popup', async popup => {
+        const popupUrl = popup.url();
+        if (!popupUrl.includes('download') && !popupUrl.includes('cloudflare')) {
+          console.log(`[Processors] Blocked non-essential popup: ${popupUrl}`);
+          await popup.close();
         }
-        const [response] = await Promise.all([
-            page.waitForNavigation({
-                waitUntil: 'domcontentloaded',
-                timeout: 60000
-            }),
-            targetFrame.click('#download-button')
-        ]);
-        await page.waitForFunction(() => {
-            const el = document.querySelector('#vd');
-            return el?.href?.length > 100;
-        }, { timeout: 120000, polling: 'raf' });
-        const videoUrl = await page.$eval('#vd', el => el.href);
-        return videoUrl;
+      });
+      await page.evaluateOnNewDocument(() => {
+        window.open = function() {};
+        window.alert = function() {};
+        window.confirm = function() { return true; };
+        window.prompt = function() { return null; };
+        Event.prototype.stopPropagation = function() {};
+      });
+      console.log(`[Processors] Navigating to URL: ${url}`);
+      await page.goto(url, {
+        waitUntil: 'networkidle2',
+        timeout: 120000
+      });
+      console.log(`[Processors] Waiting for Cloudflare Turnstile captcha to be solved...`);
+      await page.waitForFunction(() => {
+        const input = document.querySelector('input[name="cf-turnstile-response"]');
+        return input?.value?.trim().length > 30;
+      }, {
+        timeout: 600000,
+        polling: 'raf'
+      });
+      console.log(`[Processors] Captcha solved, waiting a random period before download...`);
+      await waitRandom(1000, 3000);
+      console.log(`[Processors] Looking for download frame...`);
+      const frames = await page.frames();
+      const targetFrame = frames.find(frame =>
+        frame.url().includes('download') || frame.url().includes('video')
+      );
+      if (!targetFrame) {
+        throw new Error("Could not find download frame");
+      }
+      console.log(`[Processors] Found download frame, clicking download button...`);
+      const [response] = await Promise.all([
+        page.waitForNavigation({
+          waitUntil: 'domcontentloaded',
+          timeout: 60000
+        }),
+        targetFrame.click('#download-button')
+      ]);
+      console.log(`[Processors] Waiting for direct URL to become available...`);
+      await page.waitForFunction(() => {
+        const el = document.querySelector('#vd');
+        return el?.href?.length > 100;
+      }, { timeout: 120000, polling: 'raf' });
+      const videoUrl = await page.$eval('#vd', el => el.href);
+      console.log(`[Processors] Successfully retrieved direct URL: ${videoUrl}`);
+      return videoUrl;
     } catch (error) {
-        console.error('❌ Processing error:', error);
-        if (retryAttempt < maxRetries) {
-            console.log(`Retrying... Attempt ${retryAttempt + 1} of ${maxRetries}`);
-            return processUrl(url, doc, resolution, retryAttempt + 1);
-        }
-        throw error;
+      console.error('[Processors] Processing error:', error);
+      if (retryAttempt < maxRetries) {
+        console.log(`[Processors] Retrying... Attempt ${retryAttempt + 1} of ${maxRetries}`);
+        return processUrl(url, doc, resolution, retryAttempt + 1);
+      }
+      throw error;
     } finally {
-        if (browser) {
-            await browser.close().catch(console.error);
-        }
-        if (tempDir) {
-            fs.rmSync(tempDir, { recursive: true, force: true });
-        }
+      if (browser) {
+        console.log(`[Processors] Closing browser...`);
+        await browser.close().catch(console.error);
+      }
+      if (tempDir) {
+        console.log(`[Processors] Removing temporary directory...`);
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
     }
-}
+  }
 module.exports = {
     processUrl
 };
 ```
 
-## File: telegram.js
+## File: src/telegram.js
 ```javascript
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
@@ -962,7 +741,7 @@ process.on('SIGTERM', async () => {
 module.exports = { uploadToTelegram, closeClient };
 ```
 
-## File: utils.js
+## File: src/utils.js
 ```javascript
 module.exports = {
   delay: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
@@ -1020,4 +799,253 @@ module.exports = {
           []
   })
 };
+```
+
+## File: src/workers/aria2Worker.js
+```javascript
+const BaseWorker = require('./baseWorker');
+const { downloadVideo } = require('../aria2');
+const { PROCESSING_STATUS } = require('../db');
+class Aria2Worker extends BaseWorker {
+  constructor() {
+    super('posts', {
+      workerName: 'Aria2Worker',
+      pollingInterval: 5000,
+      errorRetryDelay: 10000,
+      documentFilter: {
+        processingStatus: PROCESSING_STATUS.READY_FOR_ARIA2,
+        directUrls: { $exists: true, $ne: {} }
+      },
+      initialStatusUpdate: {
+        $set: {
+          processingStatus: PROCESSING_STATUS.DOWNLOADING_ARIA2,
+          startedAt: new Date()
+        }
+      },
+      processDocument: async (doc, collection) => {
+        console.log(`[Aria2Worker] Processing direct URLs for ${doc._id}`);
+        for (const [resolution, url] of Object.entries(doc.directUrls)) {
+          console.log(`[Aria2Worker] Downloading ${resolution} from ${url}`);
+          if (!url || doc.uploadedToTelegram?.[resolution]) continue;
+          const downloadResult = await downloadVideo(
+            url,
+            process.env.ARIA2_DOWNLOAD_DIR,
+            { ...doc, resolution }
+          );
+          console.log(`[Aria2Worker] ${resolution} download completed for ${doc._id}`);
+          if (downloadResult.success) {
+            await collection.updateOne(
+              { _id: doc._id },
+              {
+                $set: {
+                  [`uploadedToTelegram.${resolution}`]: true,
+                  processingStatus: PROCESSING_STATUS.READY_FOR_TELEGRAM,
+                  completedAt: new Date()
+                }
+              }
+            );
+          }
+        }
+      }
+    });
+  }
+}
+module.exports = Aria2Worker;
+```
+
+## File: src/workers/baseWorker.js
+```javascript
+const { getCollection } = require('../db');
+const { PROCESSING_STATUS } = require('../db');
+const { delay } = require('../utils.js');
+class BaseWorker {
+  constructor(collectionName, workerConfig) {
+    this.collectionName = collectionName;
+    this.config = workerConfig;
+    this.shouldRun = true;
+    this.activeDocumentId = null;
+  }
+  async initialize() {
+    this.collection = await getCollection(this.collectionName);
+  }
+  async start() {
+    await this.initialize();
+    console.log(`[${this.config.workerName}] Starting worker`);
+    while (this.shouldRun) {
+      let doc;
+      try {
+        console.log(`[${this.config.workerName}] Polling for documents...`);
+        doc = await this.findNextDocument();
+        if (!doc) {
+          console.log(
+            `[${this.config.workerName}] No documents found. Retrying in ${this.config.pollingInterval}ms`
+          );
+          await delay(this.config.pollingInterval);
+          continue;
+        }
+        this.activeDocumentId = doc._id;
+        console.log(`[${this.config.workerName}] Processing document ${doc._id}`);
+        await this.config.processDocument(doc, this.collection);
+        console.log(`[${this.config.workerName}] Completed processing document ${doc._id}`);
+      } catch (error) {
+        console.error(`[${this.config.workerName}] Error in worker loop:`, error);
+        if (doc) await this.handleError(doc._id, error);
+        await delay(this.config.errorRetryDelay);
+      } finally {
+        this.activeDocumentId = null;
+      }
+    }
+  }
+  async stop() {
+    console.log(`[${this.config.workerName}] Stopping worker...`);
+    this.shouldRun = false;
+    while (this.activeDocumentId) {
+      console.log(`[${this.config.workerName}] Waiting for current document ${this.activeDocumentId} to finish...`);
+      await delay(1000);
+    }
+  }
+  async findNextDocument() {
+    return this.collection.findOneAndUpdate(
+      this.config.documentFilter,
+      this.config.initialStatusUpdate,
+      { returnDocument: 'after' }
+    );
+  }
+  async handleError(docId, error) {
+    console.error(`[${this.config.workerName}] Error processing ${docId}:`, error);
+    try {
+      await this.collection.updateOne(
+        { _id: docId },
+        {
+          $set: {
+            processingStatus: PROCESSING_STATUS.ERROR,
+            error: error.message,
+            lastErrorAt: new Date()
+          },
+          $inc: { errorCount: 1 }
+        }
+      );
+      const doc = await this.collection.findOne({ _id: docId });
+      if (doc.errorCount && doc.errorCount >= 3) {
+        await this.collection.updateOne(
+          { _id: docId },
+          {
+            $set: {
+              processingStatus: PROCESSING_STATUS.PENDING,
+              error: null,
+              lastErrorAt: null,
+              errorCount: 0
+            }
+          }
+        );
+        console.log(`[${this.config.workerName}] Reset document ${docId} to pending after multiple failures`);
+      }
+    } catch (updateError) {
+      console.error(`[${this.config.workerName}] Failed to update error status for ${docId}:`, updateError);
+    }
+  }
+}
+module.exports = BaseWorker;
+```
+
+## File: src/workers/downloadWorker.js
+```javascript
+const BaseWorker = require('./baseWorker');
+const { PROCESSING_STATUS } = require('../db');
+const { processUrl } = require('../processors');
+class DownloadWorker extends BaseWorker {
+  constructor() {
+    super('posts', {
+      workerName: 'DownloadWorker',
+      pollingInterval: 5000,
+      errorRetryDelay: 10000,
+      documentFilter: {
+        isScraped: true,
+        $or: [
+          { processingStatus: { $exists: false } },
+          { processingStatus: PROCESSING_STATUS.PENDING }
+        ]
+      },
+      initialStatusUpdate: {
+        $set: {
+          processingStatus: PROCESSING_STATUS.DOWNLOADING,
+          startedAt: new Date()
+        }
+      },
+      processDocument: async (doc, collection) => {
+        console.log(`[DownloadWorker] Processing ${doc._id}`);
+        const updates = {
+          directUrls: {},
+          processingStatus: PROCESSING_STATUS.READY_FOR_ARIA2,
+          completedAt: new Date()
+        };
+        try {
+          for (const res of ['480p', '720p', '1080p']) {
+            if (!doc[res]) continue;
+            updates.directUrls[res] = await processUrl(doc[res], doc, res);
+          }
+        } finally {
+          await collection.updateOne({ _id: doc._id }, { $set: updates });
+        }
+      }
+    });
+  }
+}
+module.exports = DownloadWorker;
+```
+
+## File: src/workers/telegramWorker.js
+```javascript
+const BaseWorker = require('./baseWorker');
+const { PROCESSING_STATUS } = require('../db');
+const { uploadToTelegram } = require('../telegram');
+const { formatCaption, formatMetadata } = require('../aria2');
+const path = require('path');
+class TelegramWorker extends BaseWorker {
+  constructor() {
+    super('posts', {
+      workerName: 'TelegramWorker',
+      pollingInterval: 5000,
+      errorRetryDelay: 10000,
+      documentFilter: {
+        processingStatus: PROCESSING_STATUS.READY_FOR_TELEGRAM,
+        uploadedToTelegram: { $exists: true }
+      },
+      initialStatusUpdate: {
+        $set: {
+          processingStatus: PROCESSING_STATUS.UPLOADING_TELEGRAM,
+          startedAt: new Date()
+        }
+      },
+      processDocument: async (doc, collection) => {
+        console.log(`[TelegramWorker] Processing uploads for ${doc._id}`);
+        for (const resolution of ['480p', '720p', '1080p']) {
+          console.log(`[TelegramWorker] Checking ${resolution} for upload`);
+          if (!doc.directUrls?.[resolution] || !doc.uploadedToTelegram?.[resolution]) continue;
+          const filePath = path.join(
+            process.env.ARIA2_DOWNLOAD_DIR,
+            path.basename(doc.directUrls[resolution])
+          );
+          const metadata = formatMetadata(doc, resolution);
+          const caption = formatCaption(metadata, path.basename(filePath));
+          const uploadResult = await uploadToTelegram(filePath, caption);
+          console.log(`[TelegramWorker] ${resolution} uploaded successfully`);
+          if (uploadResult.success) {
+            await collection.updateOne(
+              { _id: doc._id },
+              {
+                $set: {
+                  [`telegramLinks.${resolution}`]: uploadResult.messageLink,
+                  processingStatus: PROCESSING_STATUS.COMPLETED,
+                  completedAt: new Date()
+                }
+              }
+            );
+          }
+        }
+      }
+    });
+  }
+}
+module.exports = TelegramWorker;
 ```
