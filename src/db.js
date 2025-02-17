@@ -92,5 +92,5 @@ module.exports = {
     UPLOADING_TELEGRAM: 'uploading_telegram',
     COMPLETED: 'completed',
     ERROR: 'error'
-  })
+  }),
 };

@@ -10,10 +10,9 @@ class DownloadWorker extends BaseWorker {
       errorRetryDelay: 10000,
       documentFilter: { 
         isScraped: true,
-        processingStatus: PROCESSING_STATUS.PENDING,
         $or: [
-          { directUrls: { $exists: false } },
-          { directUrls: {} }
+          { processingStatus: { $exists: false } },
+          { processingStatus: PROCESSING_STATUS.PENDING }
         ]
       },
       initialStatusUpdate: {

@@ -65,16 +65,38 @@ class BaseWorker {
 
   async handleError(docId, error) {
     console.error(`[${this.config.workerName}] Error processing ${docId}:`, error);
-    await this.collection.updateOne(
-      { _id: docId },
-      {
-        $set: {
-          processingStatus: PROCESSING_STATUS.ERROR,
-          error: error.message,
-          lastErrorAt: new Date()
+    try {
+      await this.collection.updateOne(
+        { _id: docId },
+        {
+          $set: {
+            processingStatus: PROCESSING_STATUS.ERROR,
+            error: error.message,
+            lastErrorAt: new Date()
+          },
+          $inc: { errorCount: 1 }
         }
+      );
+
+      // If error count exceeds threshold, reset to pending
+      const doc = await this.collection.findOne({ _id: docId });
+      if (doc.errorCount && doc.errorCount >= 3) {
+        await this.collection.updateOne(
+          { _id: docId },
+          {
+            $set: {
+              processingStatus: PROCESSING_STATUS.PENDING,
+              error: null,
+              lastErrorAt: null,
+              errorCount: 0
+            }
+          }
+        );
+        console.log(`[${this.config.workerName}] Reset document ${docId} to pending after multiple failures`);
       }
-    );
+    } catch (updateError) {
+      console.error(`[${this.config.workerName}] Failed to update error status for ${docId}:`, updateError);
+    }
   }
 }
 
