@@ -18,15 +18,18 @@ class BaseWorker {
     await this.initialize();
     console.log(`[${this.config.workerName}] Starting worker`);
     while (this.shouldRun) {
+      let doc; // Declare doc outside the try block for wider scope
       try {
         console.log(`[${this.config.workerName}] Polling for documents...`);
-        const doc = await this.findNextDocument();
+        doc = await this.findNextDocument();
         if (!doc) {
-          console.log(`[${this.config.workerName}] No documents found. Retrying in ${this.config.pollingInterval}ms`);
+          console.log(
+            `[${this.config.workerName}] No documents found. Retrying in ${this.config.pollingInterval}ms`
+          );
           await delay(this.config.pollingInterval);
           continue;
         }
-
+  
         this.activeDocumentId = doc._id;
         console.log(`[${this.config.workerName}] Processing document ${doc._id}`);
         await this.config.processDocument(doc, this.collection);
@@ -40,7 +43,7 @@ class BaseWorker {
       }
     }
   }
-
+  
   async stop() {
     console.log(`[${this.config.workerName}] Stopping worker...`);
     this.shouldRun = false;

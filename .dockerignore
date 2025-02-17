@@ -1,0 +1,8 @@
+node_modules
+*.log
+.git
+error-screenshot-*.png
+.dockerignore
+*.md
+.repomixignore
+repomix.config.json

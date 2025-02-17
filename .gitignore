@@ -6,4 +6,5 @@ aria2-config
 .git
 error-screenshot-*.png
 .env
-.dockerignore
+.repomixignore
+repomix.config.json
