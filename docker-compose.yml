@@ -21,7 +21,6 @@ services:
       - ARIA2_SECRET=${ARIA2_SECRET}
       - MONGO_URI=${MONGO_URI}
       - ARIA2_DOWNLOAD_DIR=/app/downloads
-    user: "1000:1000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:6800/jsonrpc"]
       interval: 30s

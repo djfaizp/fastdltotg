@@ -6,18 +6,18 @@ require('dotenv').config();
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
 
 // Connection settings
-const connectionSettings = {
-  maxPoolSize: 10, // Increased from 5
-  minPoolSize: 2,
-  connectTimeoutMS: 5000,
-  serverSelectionTimeoutMS: 5000,
-  socketTimeoutMS: 3000,
-  retryWrites: true,
-  retryReads: true,
-  heartbeatFrequencyMS: 10000
+const options = {
+  serverSelectionTimeoutMS: 30000, // Increase from default 30s
+  heartbeatFrequencyMS: 10000,     // Increase heartbeat frequency
+  connectTimeoutMS: 20000,         // Connection timeout
+  socketTimeoutMS: 45000,          // Socket timeout
+  retryWrites: true,               // Enable retry for write operations
+  retryReads: true,                // Enable retry for read operations
+  w: 'majority',                   // Write concern
+  maxPoolSize: 10,                 // Connection pool size
 };
 
-const client = new MongoClient(process.env.MONGO_URI, connectionSettings);
+const client = new MongoClient(process.env.MONGO_URI, options);
 let dbConnection = null;
 let isConnecting = false;
 

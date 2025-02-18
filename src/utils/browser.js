@@ -9,8 +9,10 @@ class BrowserManager {
       headless: false,
       turnstile: true,
       disableXvfb: false,
-      defaultViewport: null
+      defaultViewport: null,
     };
+    this.pool = [];
+    this.maxInstances = 3;
   }
 
   async createBrowserInstance() {
@@ -60,6 +62,18 @@ class BrowserManager {
       Event.prototype.stopPropagation = function() {};
     });
   }
-}
+  async getBrowserInstance() {
+    if (this.pool.length < this.maxInstances) {
+      const instance = await this.createBrowserInstance();
+      this.pool.push(instance);
+      return instance;
+    }
+    return this.pool[Math.floor(Math.random() * this.pool.length)];
+  }
 
+  async cleanup() {
+    await Promise.all(this.pool.map(instance => this.closeBrowserInstance(instance)));
+    this.pool = [];
+  }
+}
 module.exports = new BrowserManager();

@@ -57,11 +57,27 @@ class BaseWorker {
   }
 
   async findNextDocument() {
-    return this.collection.findOneAndUpdate(
-      this.config.documentFilter,
-      this.config.initialStatusUpdate,
-      { returnDocument: 'after' }
-    );
+    const maxRetries = 3;
+    let retryCount = 0;
+    
+    while (retryCount < maxRetries) {
+      try {
+        return await this.collection.findOneAndUpdate(
+          this.config.documentFilter,
+          this.config.initialStatusUpdate,
+          { returnDocument: 'after' }
+        );
+      } catch (error) {
+        retryCount++;
+        console.error(`[${this.config.workerName}] MongoDB operation failed (attempt ${retryCount}/${maxRetries}):`, error.message);
+        
+        if (retryCount === maxRetries) throw error;
+        
+        // Exponential backoff
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 10000);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
   }
 
   async handleError(docId, error) {

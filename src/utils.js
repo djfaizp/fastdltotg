@@ -47,14 +47,16 @@ async function safeDelete(filePath, retries = 5) {
 }
 
 // Clean up temp directory
-async function cleanupTemp() {
+async function cleanupTempDirs() {
   try {
     const files = await fs.readdir(TEMP_DIR);
-    await Promise.all(files.map(file => 
-      safeDelete(path.join(TEMP_DIR, file))
-    ));
+    await Promise.all(
+      files.map(file => 
+        fs.rm(path.join(TEMP_DIR, file), { recursive: true, force: true })
+      )
+    );
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    logger.error('Failed to cleanup temp directories:', error);
   }
 }
 
@@ -129,5 +131,5 @@ module.exports = {
   // Export new file utilities
   safeWrite,
   safeDelete,
-  cleanupTemp
+  cleanupTempDirs
 };

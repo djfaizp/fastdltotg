@@ -12,6 +12,7 @@
         "download-scraper": "file:",
         "mongodb": "^6.3.0",
         "node-cache": "^5.1.2",
+        "puppeteer-proxy": "^1.0.3",
         "puppeteer-real-browser": "^1.4.0",
         "repomix": "^0.2.28",
         "telegram": "^2.26.22",

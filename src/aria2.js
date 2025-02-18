@@ -1,46 +1,64 @@
 const Aria2 = require('aria2');
 const path = require('path');
 const { getCollection } = require('./db');
-const fs = require('fs').promises; // Use promises version for better async handling
-const { createReadStream } = require('fs');
-require('dotenv').config();
-const secret = process.env.ARIA2_SECRET;
-console.log('🔐 Initializing Aria2 client with host:', process.env.ARIA2_HOST, 'port:', process.env.ARIA2_PORT);
-if (!secret) {
-    console.warn('⚠️ ARIA2_SECRET environment variable is not set!');
-}
-const aria2Config = {
-    host: process.env.ARIA2_HOST,
+
+const DEFAULT_DOWNLOAD_OPTIONS = {
+    'continue': true,
+    'max-connection-per-server': 10,
+    'min-split-size': '10M',
+    'split': 10,
+    'file-allocation': 'none'
+};
+
+const aria2Config = Object.freeze({
+    host: 'localhost',
     port: 6800,
     secure: false,
     secret: process.env.ARIA2_SECRET,
     path: '/jsonrpc',
-    maxRetries: 3,
-    retry: true,
-    retryInterval: 1000,
-    timeout: 30000,
-    keepalive: true
-};
+    'max-concurrent-downloads': 3,
+    'max-connection-per-server': 10,
+    'min-split-size': '10M',
+    'split': 10,
+    'file-allocation': 'none',
+    'async-dns': 'true',
+    'enable-http-keep-alive': 'true',
+    'enable-http-pipelining': 'true',
+    'out': '' // Will be set dynamically
+});
+const fs = require('fs').promises;
+const { createReadStream } = require('fs');
+require('dotenv').config();
 
 let aria2Instance = null;
-const getAria2Client = () => {
+const getAria2Client = async () => {
     if (!aria2Instance) {
-      aria2Instance = new Aria2(aria2Config);
-      
-      // Add error handlers
-      aria2Instance.on('error', (err) => {
-        console.error('❌ Aria2 connection error:', err);
-        aria2Instance = null;  // Force reconnect on next call
-      });
-  
-      aria2Instance.on('open', () => 
-        console.log('✅ Aria2 connection established'));
+        console.log('[Aria2] Creating new aria2 client instance');
+        try {
+            aria2Instance = new Aria2(aria2Config);
+            
+            // Add error handlers
+            aria2Instance.on('error', (err) => {
+                console.error('❌ Aria2 connection error:', err);
+                aria2Instance = null;  // Force reconnect on next call
+            });
         
-      aria2Instance.on('close', () => 
-        console.warn('⚠️ Aria2 connection closed'));
+            aria2Instance.on('open', () =>
+                console.log('✅ Aria2 connection established'));
+                
+            aria2Instance.on('close', () =>
+                console.warn('⚠️ Aria2 connection closed'));
+                
+            // Test connection
+            await aria2Instance.open();
+            await aria2Instance.call('getVersion');
+        } catch (err) {
+            aria2Instance = null;
+            throw err;
+        }
     }
     return aria2Instance;
-  };
+};
   
 
 // Cache emoji map
@@ -108,35 +126,27 @@ ${EMOJI_MAP.runtime} ${metadata.Runtime || 'N/A'}
 ${EMOJI_MAP.genres} ${metadata.Genres || 'N/A'}`;
 };
 
-const DEFAULT_DOWNLOAD_OPTIONS = Object.freeze({
-    split: '16',
-    'max-connection-per-server': '16',
-    'continue': true,
-    'allow-overwrite': 'true',
-    'auto-file-renaming': 'false',
-    'piece-length': '1M',
-    'lowest-speed-limit': '1K',
-    'max-tries': '5',
-    'retry-wait': '10',
-    timeout: '600',
-    'connect-timeout': '60',
-    'max-file-not-found': '5',
-    'stream-piece-selector': 'geom',  // Geometric piece selection for better throughput
-    'disk-cache': '64M',             // Disk cache for better I/O
-    'file-allocation': 'none',       // Faster file allocation
-    'async-dns': 'true',            // Async DNS resolution
-    'enable-http-keep-alive': 'true', // Keep-alive connections
-    'enable-http-pipelining': 'true'  // HTTP pipelining
-});
-
 async function downloadVideo(url, dir = process.env.ARIA2_DOWNLOAD_DIR, metadata = {}) {
     const aria2 = getAria2Client();
     let currentGuid = null;
     let downloadedFilePath = null;
 
     try {
-        // Validate inputs using Object.assign for performance
-        const options = Object.assign({}, DEFAULT_DOWNLOAD_OPTIONS, { dir });
+        // Extract filename from URL
+        const urlObj = new URL(url);
+        const originalFilename = path.basename(urlObj.pathname);
+        
+        // Clean the filename (remove query parameters if present)
+        const cleanFilename = originalFilename.split('?')[0];
+        
+        // Create options with the extracted filename
+        const options = {
+            ...DEFAULT_DOWNLOAD_OPTIONS,
+            dir,
+            'out': cleanFilename
+        };
+        
+        console.log(`📥 Downloading ${cleanFilename} from ${url}`);
         
         // Start download with optimized options
         currentGuid = await aria2.call('addUri', [url], options);
@@ -157,6 +167,7 @@ async function downloadVideo(url, dir = process.env.ARIA2_DOWNLOAD_DIR, metadata
                     }
 
                     if (status.status === 'complete') {
+                        console.log(`\n✅ Download completed: ${cleanFilename}`);
                         resolve(status);
                     } else if (status.status === 'error') {
                         reject(new Error(status.errorMessage));
@@ -174,7 +185,7 @@ async function downloadVideo(url, dir = process.env.ARIA2_DOWNLOAD_DIR, metadata
         
         // Optimize file reading for Telegram upload
         const { uploadToTelegram } = require('./telegram');
-        const caption = formatCaption(metadata, path.basename(downloadedFilePath));
+        const caption = formatCaption(metadata, cleanFilename);
         
         const uploadResult = await uploadToTelegram(downloadedFilePath, caption);
         
@@ -190,27 +201,25 @@ async function downloadVideo(url, dir = process.env.ARIA2_DOWNLOAD_DIR, metadata
             await postsCollection.updateOne(
                 { _id: metadata._id },
                 { $set: updates },
-                { w: 1 } // Optimize write concern
+                { w: 1 }
             );
         }
 
         return { success: true, ...uploadResult };
     } catch (error) {
-        console.error('Download error:', error);
+        console.error('❌ Download error:', error);
         return { success: false, error: error.message };
     } finally {
         // Cleanup with optimized async operations
-        if (downloadedFilePath) {
-            await fs.unlink(downloadedFilePath).catch(() => {});
-        }
         if (currentGuid) {
             await aria2.call('removeDownloadResult', currentGuid).catch(() => {});
         }
     }
 }
-module.exports = { 
-    downloadVideo, 
-    formatCaption, 
+module.exports = {
+    getAria2Client,
+    downloadVideo,
+    formatCaption,
     formatMetadata,
-    EMOJI_MAP // Export for testing purposes
+    EMOJI_MAP
 };
