@@ -13,6 +13,11 @@ function isValidUrl(url) {
   }
 }
 
+function calculateProgress(totalBytes, completedBytes) {
+  if (!totalBytes || !completedBytes || totalBytes <= 0) return 0;
+  return Math.min(100, (completedBytes / totalBytes) * 100).toFixed(1);
+}
+
 class Aria2Worker extends BaseWorker {
   constructor() {
     super('posts', {
