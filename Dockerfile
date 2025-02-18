@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y \
     chromium-driver \
     xvfb \
     aria2 \
+    python3 \
+    make \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CHROME_BIN=/usr/bin/chromium
@@ -20,7 +23,7 @@ WORKDIR /app
 # Copy package files first to leverage Docker cache
 COPY package*.json ./
 
-# Combine npm commands and remove npm cache
+# Install production dependencies and clean up
 RUN npm ci --only=production && \
     npm cache clean --force
 
