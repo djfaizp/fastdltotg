@@ -4,6 +4,8 @@ const Aria2Worker = require('./workers/aria2Worker');
 const TelegramWorker = require('./workers/telegramWorker');
 const { delay } = require('./utils');
 const { getAria2Client } = require('./aria2');
+const fs = require('fs').promises;
+const path = require('path');
 // Get worker limits from environment variables
 const maxDownloadWorkers = parseInt(process.env.MAX_DOWNLOAD_WORKERS) || 1;
 const maxAria2Workers = parseInt(process.env.MAX_ARIA2_WORKERS) || 1;
@@ -16,9 +18,9 @@ console.log(`Worker configuration:
 
 async function checkAria2Connection() {
   try {
-    const aria2 = await getAria2Client(); // Add await here
-    await aria2.call('getVersion');
-    console.log('✅ Aria2 RPC connection successful');
+    const aria2 = await getAria2Client();
+    const version = await aria2.call('getVersion');
+    console.log('✅ Aria2 RPC connection successful (version:', version.version, ')');
     return true;
   } catch (error) {
     console.error('❌ Aria2 RPC connection failed:', error.message);
@@ -30,14 +32,29 @@ async function main() {
   try {
     console.log('🚀 Initializing workers...');
     
+    // Ensure download directory exists
+    const downloadDir = process.env.ARIA2_DOWNLOAD_DIR || path.join(process.cwd(), 'downloads');
+    try {
+      await fs.mkdir(downloadDir, { recursive: true });
+      console.log(`✅ Download directory ready: ${downloadDir}`);
+    } catch (error) {
+      throw new Error(`Failed to create download directory: ${error.message}`);
+    }
+
     // Check aria2 connection with retries first
     console.log('Waiting for aria2 RPC to be ready...');
     let aria2Ready = false;
     for (let i = 0; i < 5; i++) {
-      aria2Ready = await checkAria2Connection();
-      if (aria2Ready) break;
-      console.log(`Retrying aria2 connection in 2 seconds... (attempt ${i + 1}/5)`);
-      await delay(2000);
+      try {
+        aria2Ready = await checkAria2Connection();
+        if (aria2Ready) break;
+      } catch (error) {
+        console.error('Connection attempt failed:', error.message);
+      }
+      if (i < 4) {  // Don't wait after the last attempt
+        console.log(`Retrying aria2 connection in 2 seconds... (attempt ${i + 1}/5)`);
+        await delay(2000);
+      }
     }
 
     if (!aria2Ready) {

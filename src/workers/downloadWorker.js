@@ -13,11 +13,12 @@ class DownloadWorker extends BaseWorker {
       maxRetries: 3,
       documentFilter: {
         isScraped: true,
-        $and: [
-          { processingStatus: { $in: [PROCESSING_STATUS.PENDING, null] } },
-          { 'aria2Status': { $exists: false } },
-          { 'telegramStatus': { $exists: false } }
-        ]
+        $or: [
+          { "480p": { $exists: true }, "directUrls.480p": { $exists: false } },
+          { "720p": { $exists: true }, "directUrls.720p": { $exists: false } },
+          { "1080p": { $exists: true }, "directUrls.1080p": { $exists: false } }
+        ],
+        processingStatus: { $in: [PROCESSING_STATUS.PENDING, null] }
       },
       initialStatusUpdate: {
         $set: {
@@ -30,13 +31,15 @@ class DownloadWorker extends BaseWorker {
         let browserInstance;
         let successfulUrls = 0;
         let totalAttempts = 0;
-        const updates = { directUrls: {} };
 
         try {
           browserInstance = await browserManager.createBrowserInstance();
 
           for (const resolution of ['480p', '720p', '1080p']) {
-            if (!doc[resolution]) continue;
+            // Skip if resolution URL doesn't exist or already processed
+            if (!doc[resolution] || doc.directUrls?.[resolution]) {
+              continue;
+            }
 
             totalAttempts++;
             let retries = 3;
@@ -46,19 +49,15 @@ class DownloadWorker extends BaseWorker {
               try {
                 const directUrl = await processUrl(doc[resolution], doc, resolution);
                 if (directUrl) {
-                  updates.directUrls[resolution] = directUrl;
                   succeeded = true;
                   successfulUrls++;
                   logger.info(`[DownloadWorker] Got direct URL for ${resolution}: ${directUrl}`);
-                  
-                  // Update the document immediately for this resolution
                   await collection.updateOne(
                     { _id: doc._id },
                     {
                       $set: {
                         [`directUrls.${resolution}`]: directUrl,
-                        [`processingStatus.${resolution}`]: PROCESSING_STATUS.READY_FOR_ARIA2,
-                        [`lastUpdated.${resolution}`]: new Date()
+                        processingStatus: PROCESSING_STATUS.READY_FOR_ARIA2
                       }
                     }
                   );
@@ -66,68 +65,48 @@ class DownloadWorker extends BaseWorker {
                 break;
               } catch (error) {
                 retries--;
+                logger.error(`[DownloadWorker] Attempt ${3 - retries}/3 failed for ${resolution}:`, error);
                 if (retries === 0) {
-                  logger.error(`[DownloadWorker] Failed to get direct URL for ${resolution} after all retries`);
-                  // Mark this resolution as failed
                   await collection.updateOne(
                     { _id: doc._id },
                     {
                       $set: {
-                        [`processingStatus.${resolution}`]: PROCESSING_STATUS.ERROR,
-                        [`error.${resolution}`]: error.message,
-                        [`lastUpdated.${resolution}`]: new Date()
+                        [`errors.${resolution}`]: error.message,
+                        lastErrorAt: new Date()
                       }
                     }
                   );
-                } else {
-                  logger.warn(`[DownloadWorker] Retrying ${resolution} for ${doc._id}, ${retries} attempts remaining`);
-                  await new Promise(resolve => setTimeout(resolve, 1000));
                 }
               }
             }
           }
 
-          // Update final status based on results
-          if (totalAttempts === 0) {
-            await collection.updateOne(
-              { _id: doc._id },
-              {
-                $set: {
-                  processingStatus: PROCESSING_STATUS.ERROR,
-                  error: 'No resolutions to process',
-                  completedAt: new Date()
-                }
-              }
-            );
-          } else if (successfulUrls === 0) {
-            await collection.updateOne(
-              { _id: doc._id },
-              {
-                $set: {
-                  processingStatus: PROCESSING_STATUS.ERROR,
-                  error: 'Failed to get any direct URLs',
-                  completedAt: new Date()
-                }
-              }
-            );
-          } else {
-            // At least one resolution succeeded
+          // Update final status
+          if (successfulUrls > 0) {
             await collection.updateOne(
               { _id: doc._id },
               {
                 $set: {
                   processingStatus: PROCESSING_STATUS.READY_FOR_ARIA2,
-                  aria2Status: 'pending',
-                  completedAt: new Date(),
-                  partialSuccess: successfulUrls < totalAttempts
+                  completedAt: new Date()
                 }
               }
             );
             logger.info(
               `[DownloadWorker] Updated document ${doc._id} with ${successfulUrls}/${totalAttempts} direct URLs`
             );
+          } else {
+            await collection.updateOne(
+              { _id: doc._id },
+              {
+                $set: {
+                  processingStatus: PROCESSING_STATUS.ERROR,
+                  error: 'Failed to extract any direct URLs',
+                  completedAt: new Date()
+                }
+              }
+            );
           }
-
         } catch (error) {
           logger.error(`[DownloadWorker] Unexpected error processing ${doc._id}:`, error);
           await collection.updateOne(

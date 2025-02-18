@@ -49,14 +49,25 @@ const getAria2Client = async () => {
             aria2Instance.on('close', () =>
                 console.warn('⚠️ Aria2 connection closed'));
                 
-            // Test connection
+            // Test connection and ensure it's open
             await aria2Instance.open();
-            await aria2Instance.call('getVersion');
+            const version = await aria2Instance.call('getVersion');
+            console.log('[Aria2] Connected to aria2 version:', version.version);
         } catch (err) {
+            console.error('[Aria2] Failed to initialize client:', err);
             aria2Instance = null;
             throw err;
         }
     }
+    
+    // Test connection by making a simple call
+    try {
+        await aria2Instance.call('getVersion');
+    } catch (err) {
+        aria2Instance = null;
+        throw new Error('Failed to reconnect to aria2: ' + err.message);
+    }
+    
     return aria2Instance;
 };
   
@@ -127,50 +138,96 @@ ${EMOJI_MAP.genres} ${metadata.Genres || 'N/A'}`;
 };
 
 async function downloadVideo(url, dir = process.env.ARIA2_DOWNLOAD_DIR, metadata = {}) {
-    const aria2 = getAria2Client();
+    let aria2;
     let currentGuid = null;
     let downloadedFilePath = null;
 
     try {
-        // Extract filename from URL
-        const urlObj = new URL(url);
-        const originalFilename = path.basename(urlObj.pathname);
+        // Ensure download directory exists
+        try {
+            await fs.mkdir(dir, { recursive: true });
+        } catch (err) {
+            console.error(`Failed to create download directory ${dir}:`, err);
+            throw new Error(`Failed to create download directory: ${err.message}`);
+        }
+
+        // Get client with retry logic
+        for (let i = 0; i < 3; i++) {
+            try {
+                aria2 = await getAria2Client();
+                await aria2.call('getVersion');
+                break;
+            } catch (err) {
+                if (i === 2) throw err;
+                console.log(`[Aria2] Retrying connection (${i + 1}/3)...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+        }
+
+        // Extract filename from metadata or URL
+        let filename;
+        if (metadata.filename) {
+            filename = metadata.filename;
+        } else {
+            const urlObj = new URL(url);
+            const originalFilename = path.basename(urlObj.pathname);
+            filename = originalFilename.split('?')[0];
+        }
         
-        // Clean the filename (remove query parameters if present)
-        const cleanFilename = originalFilename.split('?')[0];
-        
-        // Create options with the extracted filename
         const options = {
             ...DEFAULT_DOWNLOAD_OPTIONS,
             dir,
-            'out': cleanFilename
+            'out': filename,
+            'max-tries': '5',
+            'retry-wait': '10',
+            'connect-timeout': '30',
+            'timeout': '600',
+            'max-connection-per-server': '16',
+            'split': '16'
         };
         
-        console.log(`📥 Downloading ${cleanFilename} from ${url}`);
+        console.log(`📥 Downloading ${filename} from ${url}`);
         
-        // Start download with optimized options
+        // Verify connection before starting download
+        await aria2.call('getVersion');
         currentGuid = await aria2.call('addUri', [url], options);
         
-        // Monitor download progress with optimized polling
+        // Monitor download progress with timeout
         const status = await new Promise((resolve, reject) => {
             let lastUpdate = Date.now();
+            let lastProgress = 0;
+            let staleCount = 0;
+            const MAX_STALE_COUNT = 5; // Maximum number of stale progress checks
+
             const checkStatus = async () => {
                 try {
                     const status = await aria2.call('tellStatus', currentGuid);
                     
-                    // Update progress less frequently
                     const now = Date.now();
                     if (now - lastUpdate > 1000) {
                         const progress = parseInt(status.completedLength) / parseInt(status.totalLength);
-                        process.stdout.write(`\rProgress: ${(progress * 100).toFixed(1)}%`);
+                        
+                        // Check if progress is stale
+                        if (!isNaN(progress) && progress === lastProgress) {
+                            staleCount++;
+                            if (staleCount >= MAX_STALE_COUNT) {
+                                reject(new Error('Download stalled - no progress'));
+                                return;
+                            }
+                        } else {
+                            staleCount = 0;
+                            lastProgress = progress;
+                        }
+
+                        process.stdout.write(`Progress: ${(progress * 100).toFixed(1)}%`);
                         lastUpdate = now;
                     }
 
                     if (status.status === 'complete') {
-                        console.log(`\n✅ Download completed: ${cleanFilename}`);
+                        console.log(`\n✅ Download completed: ${filename}`);
                         resolve(status);
                     } else if (status.status === 'error') {
-                        reject(new Error(status.errorMessage));
+                        reject(new Error(status.errorMessage || 'Download failed'));
                     } else {
                         setTimeout(checkStatus, 1000);
                     }
@@ -178,42 +235,32 @@ async function downloadVideo(url, dir = process.env.ARIA2_DOWNLOAD_DIR, metadata
                     reject(error);
                 }
             };
-            checkStatus();
+            
+            // Set overall timeout
+            const timeout = setTimeout(() => {
+                reject(new Error('Download timeout after 10 minutes'));
+            }, 600000); // 10 minutes
+
+            checkStatus().finally(() => clearTimeout(timeout));
         });
 
         downloadedFilePath = status.files[0]?.path;
-        
-        // Optimize file reading for Telegram upload
-        const { uploadToTelegram } = require('./telegram');
-        const caption = formatCaption(metadata, cleanFilename);
-        
-        const uploadResult = await uploadToTelegram(downloadedFilePath, caption);
-        
-        // Batch MongoDB updates
-        if (metadata._id && metadata.resolution) {
-            const updates = {
-                [`uploadedToTelegram.${metadata.resolution}`]: true,
-                [`telegramLinks.${metadata.resolution}`]: uploadResult.messageLink,
-                lastUpdated: new Date()
-            };
-            
-            const postsCollection = await getCollection('posts');
-            await postsCollection.updateOne(
-                { _id: metadata._id },
-                { $set: updates },
-                { w: 1 }
-            );
-        }
-
-        return { success: true, ...uploadResult };
+        return { 
+            success: true, 
+            filePath: downloadedFilePath,
+            messageLink: null // Will be set by telegram upload
+        };
     } catch (error) {
         console.error('❌ Download error:', error);
-        return { success: false, error: error.message };
-    } finally {
-        // Cleanup with optimized async operations
+        // Try to clean up failed download
         if (currentGuid) {
-            await aria2.call('removeDownloadResult', currentGuid).catch(() => {});
+            try {
+                await aria2.call('remove', currentGuid);
+            } catch (e) {
+                console.error('Failed to clean up download:', e);
+            }
         }
+        return { success: false, error: error.message };
     }
 }
 module.exports = {

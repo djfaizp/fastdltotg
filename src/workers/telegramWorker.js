@@ -13,8 +13,6 @@ class TelegramWorker extends BaseWorker {
       errorRetryDelay: 10000,
       documentFilter: {
         processingStatus: PROCESSING_STATUS.READY_FOR_TELEGRAM,
-        uploadedToTelegram: { $exists: true },
-        telegramLinks: { $not: { $size: 3 } },
         'aria2Status': 'completed',  // Only process documents completed by aria2
         'telegramStatus': { $ne: 'completed' }  // Only process documents not completed by telegram
       },
@@ -30,47 +28,51 @@ class TelegramWorker extends BaseWorker {
         const filesToDelete = [];
         
         try {
-          for (const resolution of ['480p', '720p', '1080p']) {
-            console.log(`[TelegramWorker] Checking ${resolution} for upload`);
-            if (!doc.directUrls?.[resolution] || doc.telegramLinks?.[resolution]) continue;
-            
-            const filePath = path.join(
-              process.env.ARIA2_DOWNLOAD_DIR,
-              path.basename(doc.directUrls[resolution])
-            );
-            filesToDelete.push(filePath);
-            
-            const metadata = formatMetadata(doc, resolution);
-            const caption = formatCaption(metadata, path.basename(filePath));
-            
-            const uploadResult = await uploadToTelegram(filePath, caption);
-            console.log(`[TelegramWorker] ${resolution} uploaded successfully`);
-
-            if (uploadResult.success) {
-              await collection.updateOne(
-                { _id: doc._id },
-                {
-                  $set: {
-                    [`telegramLinks.${resolution}`]: uploadResult.messageLink,
-                    processingStatus: PROCESSING_STATUS.COMPLETED,
-                    telegramStatus: 'completed',
-                    completedAt: new Date()
-                  }
-                }
-              );
-            } else {
-              throw new Error(`Upload failed for ${resolution}: ${uploadResult.error}`);
-            }
+          // Get the downloaded file path from aria2 completion data
+          const filePath = doc.aria2DownloadPath;
+          if (!filePath) {
+            throw new Error('Download path not found in document');
           }
 
-          // Delete files after successful upload
+          filesToDelete.push(filePath);
+          
+          // Get resolution from aria2 metadata
+          const resolution = doc.currentResolution;
+          if (!resolution) {
+            throw new Error('Resolution information not found');
+          }
+
+          console.log(`[TelegramWorker] Uploading ${resolution} file: ${filePath}`);
+          
+          const metadata = formatMetadata(doc, resolution);
+          const caption = formatCaption(metadata, path.basename(filePath));
+          
+          const uploadResult = await uploadToTelegram(filePath, caption);
+          console.log(`[TelegramWorker] ${resolution} uploaded successfully`);
+
+          if (uploadResult.success) {
+            await collection.updateOne(
+              { _id: doc._id },
+              {
+                $set: {
+                  [`telegramLinks.${resolution}`]: uploadResult.messageLink,
+                  processingStatus: PROCESSING_STATUS.COMPLETED,
+                  telegramStatus: 'completed',
+                  completedAt: new Date()
+                }
+              }
+            );
+          } else {
+            throw new Error(`Upload failed for ${resolution}: ${uploadResult.error}`);
+          }
+
+          // Delete file after successful upload
           for (const filePath of filesToDelete) {
             try {
               await safeDelete(filePath);
               console.log(`[TelegramWorker] Successfully deleted file: ${filePath}`);
             } catch (deleteError) {
               console.error(`[TelegramWorker] Failed to delete file ${filePath}:`, deleteError);
-              // Continue execution even if file deletion fails
             }
           }
 
@@ -81,6 +83,7 @@ class TelegramWorker extends BaseWorker {
             {
               $set: {
                 processingStatus: PROCESSING_STATUS.ERROR,
+                telegramStatus: 'error',
                 error: error.message,
                 completedAt: new Date()
               }
