@@ -1,4 +1,4 @@
-FROM node:23.1.0-slim
+FROM node:latest
 
 # Install dependencies in a single RUN to reduce layers
 RUN apt-get update && apt-get install -y \
