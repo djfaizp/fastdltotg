@@ -10,7 +10,7 @@ if (!secret) {
     console.warn('⚠️ ARIA2_SECRET environment variable is not set!');
 }
 const aria2Config = {
-    host: "aria2",
+    host: "localhost",
     port: 6800,
     secure: false,
     secret: process.env.ARIA2_SECRET,
@@ -96,9 +96,9 @@ ${EMOJI_MAP.genres} ${metadata.Genres || 'N/A'}`;
 };
 
 const DEFAULT_DOWNLOAD_OPTIONS = Object.freeze({
-    split: '16',
-    'max-connection-per-server': '16',
-    'continue': true,
+    split: '1',                      // Single connection for Google servers
+    'max-connection-per-server': '1', // Single connection per server
+    'continue': false,               // Disable continue as Google uses temporary URLs
     'allow-overwrite': 'true',
     'auto-file-renaming': 'false',
     'piece-length': '1M',
@@ -108,12 +108,13 @@ const DEFAULT_DOWNLOAD_OPTIONS = Object.freeze({
     timeout: '600',
     'connect-timeout': '60',
     'max-file-not-found': '5',
-    'stream-piece-selector': 'geom',  // Geometric piece selection for better throughput
-    'disk-cache': '64M',             // Disk cache for better I/O
-    'file-allocation': 'none',       // Faster file allocation
-    'async-dns': 'true',            // Async DNS resolution
-    'enable-http-keep-alive': 'true', // Keep-alive connections
-    'enable-http-pipelining': 'true'  // HTTP pipelining
+    'stream-piece-selector': 'default', // Changed to default for Google servers
+    'disk-cache': '64M',
+    'file-allocation': 'none',
+    'async-dns': 'true',
+    'enable-http-keep-alive': 'true',
+    'enable-http-pipelining': 'false',  // Disabled for Google servers
+    'header': 'Accept: */*'            // Added generic accept header
 });
 
 async function downloadVideo(url, dir = process.env.ARIA2_DOWNLOAD_DIR, metadata = {}) {
