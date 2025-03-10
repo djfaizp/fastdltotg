@@ -1,10 +1,10 @@
-# Add patterns to ignore here, one per line
+node_modules
+chrome-data
+downloads
+aria2-config
 *.log
-tmp/
-node_modules/
-package-lock.json
-.vscode/
-.repomixignore
-repomix-output.md
-.env*
-repomix.config.json
+.git
+error-screenshot-*.png
+.env
+.dockerignore
+docker-compose.yml

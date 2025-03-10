@@ -1,0 +1,11 @@
+# Python dependencies for Telegram file upload functionality
+
+# Core dependencies
+telethon>=1.24.0,<2.0.0  # Telegram client library
+python-dotenv>=0.19.0    # Environment variable management
+
+# Optional dependencies for debugging and monitoring
+psutil>=5.8.0            # Process and system utilities (used in debug mode)
+
+# Additional dependencies that might be needed based on the codebase
+asyncio>=3.4.3           # Asynchronous I/O
