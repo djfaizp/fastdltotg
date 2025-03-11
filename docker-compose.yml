@@ -1,0 +1,41 @@
+services:
+  app:
+    build: .
+    container_name: download-scraper
+    restart: unless-stopped
+    ports:
+      - "1234:1234"
+    volumes:
+      - ./downloads:/aria2/data
+      - ./chrome-data:/app/chrome-data:rw,z
+    environment:
+      - NODE_ENV=production
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - TELEGRAM_STRING_SESSION=${TELEGRAM_STRING_SESSION}
+      - TELEGRAM_CHANNEL_ID=${TELEGRAM_CHANNEL_ID}
+      - ARIA2_SECRET=${ARIA2_SECRET}
+      - MONGO_URI=${MONGO_URI}
+      - ARIA2_DOWNLOAD_DIR=/aria2/data
+    user: "1000:1000"
+    depends_on:
+      - aria2
+  aria2:
+    image: p3terx/aria2-pro:latest
+    container_name: aria2
+    ports:
+      - "6800:6800"
+      - "6888:6888"
+      - "6888:6888/udp"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - RPC_SECRET=
+      - RPC_PORT=6800
+    volumes:
+      - ./downloads:/aria2/data
+      - aria2_config:/config
+    restart: unless-stopped
+
+volumes:
+  aria2_config:

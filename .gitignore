@@ -1,0 +1,10 @@
+node_modules
+chrome-data
+downloads
+aria2-config
+*.log
+.git
+error-screenshot-*.png
+.env
+.dockerignore
+docker-compose.yml
