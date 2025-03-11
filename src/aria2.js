@@ -12,7 +12,7 @@ if (!secret) {
 }
 
 const aria2Config = {
-    host: process.env.ARIA2_HOST || "localhost",
+    host: process.env.ARIA2_HOST || "aria2",
     port: parseInt(process.env.ARIA2_PORT) || 6800,
     secure: false,
     secret: process.env.ARIA2_SECRET,
